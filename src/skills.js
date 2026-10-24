@@ -68,8 +68,12 @@ function renderSkill({ name, description, body }) {
 }
 
 /** 技能库：所有写操作都落在这里，路径一律限制在根目录内。 */
-export function createSkillLibrary({ dir, usageFile }) {
+export function createSkillLibrary({ dir, usageFile, strictReadBeforeWrite = true }) {
   const root = path.resolve(dir);
+  // read-before-write：记下「读过时」的 SKILL.md 摘要，写之前比对。
+  // 抄 Hermes 的 skill_manager_guards（read-before-write 强制），但用内容哈希而不是
+  // 只记「读过没」——读写之间被别人改过时，旧文本上的 patch 会悄悄写坏技能。
+  const reads = new Map();
 
   function inside(target) {
     const resolved = path.resolve(target);
@@ -85,6 +89,27 @@ export function createSkillLibrary({ dir, usageFile }) {
 
   function skillPath(name) {
     return path.join(skillDir(name), 'SKILL.md');
+  }
+
+  function digestOf(file) {
+    try {
+      return createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 写前检查：必须读过、且读完之后文件没被改过。返回错误文案或 undefined。 */
+  function requireRead(name, action) {
+    if (!strictReadBeforeWrite) return undefined;
+    const seen = reads.get(name);
+    if (seen === undefined) {
+      return `read the skill first: skill_manage(action="read", name="${name}") before ${action}`;
+    }
+    if (digestOf(skillPath(name)) !== seen) {
+      return `skill ${name} changed on disk since you read it; read it again before ${action}`;
+    }
+    return undefined;
   }
 
   function readUsage() {
@@ -177,6 +202,7 @@ export function createSkillLibrary({ dir, usageFile }) {
     const file = skillPath(name);
     if (!fs.existsSync(file)) return undefined;
     bumpUsage(name, 'view_count');
+    reads.set(name, digestOf(file));
     return { name, path: file, text: fs.readFileSync(file, 'utf8') };
   }
 
@@ -187,6 +213,7 @@ export function createSkillLibrary({ dir, usageFile }) {
     if (fs.existsSync(file)) return { success: false, error: `skill ${name} already exists; use patch to edit it` };
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, renderSkill({ name, description, body }), 'utf8');
+    reads.set(name, digestOf(file));
     bumpUsage(name, 'use_count');
     return { success: true, name, path: file, note: 'Skill created. Edit with patch when it turns out to be wrong.' };
   }
@@ -195,6 +222,8 @@ export function createSkillLibrary({ dir, usageFile }) {
     const file = skillPath(name);
     // 刻意不走 read()：改技能不该把 view_count 也算一次「看」。
     if (!fs.existsSync(file)) return { success: false, error: `skill ${name} not found; call skill_manage(action="create") first` };
+    const staleRead = requireRead(name, 'patch');
+    if (staleRead) return { success: false, error: staleRead };
     const current = { name, path: file, text: fs.readFileSync(file, 'utf8') };
     if (typeof oldString !== 'string' || oldString.length === 0) {
       return { success: false, error: 'old_string is required for patch (read the skill first, then copy the exact text)' };
@@ -220,6 +249,7 @@ export function createSkillLibrary({ dir, usageFile }) {
     const problem = validateSkill({ name, description: nextDescription, body });
     if (problem) return { success: false, error: problem };
     fs.writeFileSync(current.path, replaced, 'utf8');
+    reads.set(name, digestOf(current.path));
     bumpUsage(name, 'patch_count');
     return { success: true, name, path: current.path, replaced: hits };
   }
@@ -230,7 +260,11 @@ export function createSkillLibrary({ dir, usageFile }) {
     if (!absorbedInto || !absorbedInto.trim()) {
       return { success: false, error: 'absorbed_into is required: name the skill that now covers this one, or patch it instead of deleting' };
     }
+    // 删除前必须读过、且内容没变：名字打错时这条能拦住「删掉另一个同名技能」。
+    const staleRead = requireRead(name, 'delete');
+    if (staleRead) return { success: false, error: staleRead };
     fs.rmSync(skillDir(name), { recursive: true, force: true });
+    reads.delete(name);
     bumpUsage(name, 'use_count');
     return { success: true, name, absorbed_into: absorbedInto };
   }
@@ -242,6 +276,8 @@ export function createSkillLibrary({ dir, usageFile }) {
     }
     const target = inside(path.join(dir, filePath));
     if (Buffer.byteLength(content ?? '', 'utf8') > 1024 * 1024) return { success: false, error: 'file must be at most 1 MiB' };
+    const staleRead = requireRead(name, 'write_file');
+    if (staleRead) return { success: false, error: staleRead };
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, content ?? '', 'utf8');
     return { success: true, name, path: target };

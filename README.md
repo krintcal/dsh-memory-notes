@@ -47,6 +47,20 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
 | `curatorArchiveAfterDays` | `30` | 多久没动归档 |
 | `curatorKeepSnapshots` | `5` | 保留几份快照 |
 | `curatorPaused` | `false` | 暂停整理 |
+| `strictReadBeforeWrite` | `true` | 技能写入前必须读过、且读后文件未变 |
+| `pendingDir` | `<dir>/pending` | 后台 review 的破坏性写入排队目录 |
+
+## 0.2.0：两道安全门
+
+抄 Hermes 的 `memory_tool.py`（stage_write / background_delete_gate）与 `skill_manager_guards.py`
+（read-before-write），因为这两类错误都是「悄悄写坏、事后难查」：
+
+1. **技能写入必须先读**：`patch` / `delete` / `write_file` 之前必须 `action=read` 过同一技能，
+   且读完之后文件没被改过（比对 sha256）。没读过 → `read the skill first`；读过但内容变了 →
+   `changed on disk since you read it`。`strictReadBeforeWrite: false` 可关。
+2. **后台 review 不能直接改已有条目**：review fork 只允许 `action=add`；要合并或删除已有条目时
+   必须 `action=stage`（`op=replace|remove`），记录落在 `pendingDir`，由主会话 `list_pending` 看完再
+   `apply_pending` 落盘。排队期间磁盘完全不变。
 
 ## Phase 2：后台 review（已实现）
 

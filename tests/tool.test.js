@@ -47,7 +47,8 @@ function setup(config = {}) {
 test('apply 注册 memory 工具与 order 9000 的 memory 提示词段', () => {
   const { tool, section } = setup();
   assert.equal(tool.name, 'memory');
-  assert.ok(tool.parameters.required.includes('target'));
+  assert.deepEqual(tool.parameters.properties.target.enum, ['memory', 'user']);
+  assert.ok(Array.isArray(tool.parameters.required));
   assert.equal(typeof tool.output.render, 'function');
   assert.equal(section.name, 'memory');
   assert.equal(section.order, 9000);
@@ -151,6 +152,7 @@ test('skill_manage：snake_case 参数映射与 pin/status 分发', () => {
   const created = skill.execute({ action: 'create', name: 'demo-skill', description: '演示', body: '## 步骤' });
   assert.equal(created.success, true);
 
+  skill.execute({ action: 'read', name: 'demo-skill' });
   const patched = skill.execute({
     action: 'patch',
     name: 'demo-skill',
@@ -184,4 +186,49 @@ test('curator turn/end 接线：turn/end 才触发，其他事件不写盘', asy
   await new Promise((resolve) => setImmediate(resolve));
   const state = JSON.parse(fs.readFileSync(path.join(dir, 'curator-state.json'), 'utf8'));
   assert.equal(state.run_count, 1);
+});
+
+test('stage → list_pending → apply_pending：后台只排队，主会话才落盘', () => {
+  const { dir, tool } = setup();
+  tool.execute({ target: 'memory', action: 'add', content: '旧的事实' }, {});
+
+  const staged = tool.execute(
+    { target: 'memory', action: 'stage', op: 'replace', old_text: '旧的事实', content: '新的事实' },
+    {},
+  );
+  assert.equal(staged.success, true, JSON.stringify(staged));
+  assert.equal(staged.staged, true);
+  assert.match(staged.pending_id, /^[a-z0-9-]+$/);
+  // 排队期间磁盘完全没变
+  assert.match(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8'), /旧的事实/);
+
+  const listed = tool.execute({ action: 'list_pending' }, {});
+  assert.equal(listed.success, true);
+  assert.equal(listed.pending_count, 1);
+  assert.equal(listed.pending[0].op, 'replace');
+  assert.equal(listed.pending[0].old_text, '旧的事实');
+
+  const applied = tool.execute({ action: 'apply_pending', pending_id: staged.pending_id }, {});
+  assert.equal(applied.success, true, JSON.stringify(applied));
+  assert.equal(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8'), '新的事实');
+  assert.equal(tool.execute({ action: 'list_pending' }, {}).pending_count, 0);
+});
+
+test('stage 参数不全 / apply 不存在的 id 都返回错误而不是抛异常', () => {
+  const { tool } = setup();
+  assert.equal(tool.execute({ action: 'stage', target: 'memory', old_text: 'x' }, {}).success, false);
+  assert.equal(tool.execute({ action: 'stage', target: 'memory', op: 'remove' }, {}).success, false);
+  const missing = tool.execute({ action: 'apply_pending', pending_id: 'nope-123' }, {});
+  assert.equal(missing.success, false);
+  assert.match(missing.error, /no pending entry/);
+  const traversal = tool.execute({ action: 'apply_pending', pending_id: '../etc/passwd' }, {});
+  assert.equal(traversal.success, false);
+});
+
+test('主会话直接 replace 仍然可用（staging 只对后台任务约定）', () => {
+  const { dir, tool } = setup();
+  tool.execute({ target: 'user', action: 'add', content: '喜欢简短回答' }, {});
+  const res = tool.execute({ target: 'user', action: 'replace', old_text: '简短', content: '极简短' }, {});
+  assert.equal(res.success, true);
+  assert.match(fs.readFileSync(path.join(dir, 'USER.md'), 'utf8'), /极简短/);
 });

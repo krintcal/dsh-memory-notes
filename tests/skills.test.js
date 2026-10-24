@@ -137,3 +137,54 @@ test('patch 命中多处时要求 replace_all', () => {
   assert.equal(all.replaced, 2);
 });
 
+
+test('read-before-write：没读就 patch / delete / write_file 一律拒绝', () => {
+  const { dir, lib } = makeLibrary();
+  // 直接落盘模拟「别人的技能」：create 会记下作者自写的摘要，这里不能走 create。
+  fs.mkdirSync(path.join(dir, 'guarded'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'guarded', 'SKILL.md'),
+    '---\nname: "guarded"\ndescription: "受保护"\n---\n\n## 原始\n',
+    'utf8',
+  );
+
+  const blind = lib.patch({ name: 'guarded', oldString: '## 原始', newString: '## 改' });
+  assert.equal(blind.success, false);
+  assert.match(blind.error, /read the skill first/);
+
+  const blindDelete = lib.remove({ name: 'guarded', absorbedInto: 'other' });
+  assert.equal(blindDelete.success, false);
+  assert.match(blindDelete.error, /read the skill first/);
+
+  const blindFile = lib.writeFile({ name: 'guarded', filePath: 'notes.md', content: 'x' });
+  assert.equal(blindFile.success, false);
+  assert.match(blindFile.error, /read the skill first/);
+});
+
+test('read-before-write：读后可写；读完之后被外部改过则拒绝', () => {
+  const { dir, lib } = makeLibrary();
+  lib.create({ name: 'guarded', description: '受保护', body: '## 原始' });
+  lib.read('guarded');
+  const ok = lib.patch({ name: 'guarded', oldString: '## 原始', newString: '## 改' });
+  assert.equal(ok.success, true, JSON.stringify(ok));
+
+  // 模拟别的进程改了文件
+  const file = path.join(dir, 'guarded', 'SKILL.md');
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8') + '\n外部追加\n', 'utf8');
+  const stale = lib.patch({ name: 'guarded', oldString: '## 改', newString: '## 再改' });
+  assert.equal(stale.success, false);
+  assert.match(stale.error, /changed on disk since you read it/);
+
+  // 重新读一次就恢复
+  lib.read('guarded');
+  const again = lib.patch({ name: 'guarded', oldString: '## 改', newString: '## 再改' });
+  assert.equal(again.success, true, JSON.stringify(again));
+});
+
+test('read-before-write 可关闭（strictReadBeforeWrite: false）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-skills-lax-'));
+  const lib = createSkillLibrary({ dir, usageFile: path.join(dir, 'usage.json'), strictReadBeforeWrite: false });
+  lib.create({ name: 'lax', description: '宽松', body: '## 原始' });
+  const res = lib.patch({ name: 'lax', oldString: '## 原始', newString: '## 改' });
+  assert.equal(res.success, true, JSON.stringify(res));
+});

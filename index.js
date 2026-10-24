@@ -67,7 +67,14 @@ export function apply(ctx, config = {}) {
     userCharLimit: config.userCharLimit ?? 1375,
   });
 
-  ctx.tools.register(toolDefinition({ store, limits: store.limits }));
+  ctx.tools.register(
+    toolDefinition({
+      store,
+      limits: store.limits,
+      // 后台 review 的破坏性写入落在这里，等主会话确认
+      pendingDir: config.pendingDir ?? path.join(store.dir, 'pending'),
+    }),
+  );
 
   // Phase 3：技能写入（自我进化的「写」半边；读的技能索引仍由 DSH 自带 skills 提供方负责）。
   let library;
@@ -75,6 +82,7 @@ export function apply(ctx, config = {}) {
     library = createSkillLibrary({
       dir: resolveSkillsDir(config),
       usageFile: path.join(store.dir, 'skill-usage.json'),
+      strictReadBeforeWrite: config.strictReadBeforeWrite !== false,
     });
   }
 
