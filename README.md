@@ -10,6 +10,7 @@ Hermes 式长期记忆的 DSH Host 插件。它给模型一个 `memory` 工具�
 - 配额按字符计：`memory` 默认 2200，`user` 默认 1375，含分隔符。超限直接拒绝写入，绝不截断。
 - `memory` 工具支持 `add` / `patch` / `remove`，或用 `operations` 数组做原子批处理（配额只按最终结果校验，所以可以先删后加）。`patch` 只替换条目内的一个 span，条目其余保留；整条重写就把整条放进 `old_text`。
 - 系统提示里的记忆块在**会话开始时冻结**：本会话内的写入不会改变已注入的文本，改动从下一个会话开始可见（prompt-cache 语义）。
+- 0.4.0 起带一个**左侧栏「记忆」面板**：看两个库的条目与配额、就地改写/删除/新增条目、批准后台 review 排队中的破坏性写入。
 
 ## 安装
 
@@ -51,6 +52,7 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
 | `curatorPaused` | `false` | 暂停整理 |
 | `strictReadBeforeWrite` | `true` | 技能写入前必须读过、且读后文件未变 |
 | `pendingDir` | `<dir>/pending` | 后台 review 的破坏性写入排队目录 |
+| `webPanelEnabled` | `true` | 关掉左侧栏面板与 `/api/dsh-memory-notes/*` 路由 |
 
 ## 0.2.0：两道安全门
 
@@ -79,6 +81,22 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
   的 approve/discard）；batch 也能整批 stage 后一次批准。
 - **review 提示词对齐** `agent/background_review.py`：默认用合并版（Memory 双库路由 + Skills「Be ACTIVE」），
   文案、偏好序、read-before-write 要求、不该捕获清单都按上游移植；工具名换成本插件的 `memory` / `skill_manage`。
+
+## 0.4.0：左侧栏记忆面板
+
+宿主半边与客户端半边都自带，装完插件重启 DSH，左侧栏（技能中心那一排）会多一个「记忆」入口。
+
+- **宿主** `src/web.js`：注册三条只走回环的 JSON 路由
+  - `GET /api/dsh-memory-notes/state` —— 两个库的条目、用量、百分比，以及排队中的 pending 提案；
+  - `POST /api/dsh-memory-notes/write` —— `{target, action: add|patch|remove, old_text?, content?}`，直接走 `MemoryStore`，成功回带最新 state；
+  - `POST /api/dsh-memory-notes/pending` —— `{id, decision: 'apply'|'discard'}`，批准时按 stage 时 pin 的 `matched_entry` 重放，条目变过就拒绝且保留记录。
+  守卫：只接受回环来源（拒绝 `x-forwarded-for` / 跨站 `sec-fetch-site` / 外站 origin），请求体上限 1 MiB，写失败回 `{ok:false, error}`。
+- **客户端** `client.js`：`window.__ModuleLoader__.load` 格式的 bundle（`dsh.client.platform: "web"`），注册
+  `sidebar.panellist`（图标 + 文案「记忆」）与 `main` 面板页；页面用文档相对路径 `api/dsh-memory-notes/*` 取数，
+  所以子路径部署也正常。面板里能直接看到「写入立即落盘，但本会话提示词是冻结快照」的提示。
+- **共用 pending 队列** `src/pending.js`：`memory` 工具的三个 pending 动作与面板共用同一批 `<dir>/pending/*.json`，
+  抽出后 `tool.js` 不再各自实现一份。
+- 面板写入与工具调用完全同语义（同一 `MemoryStore` 方法、同一超限/歧义/stale 错误文案），区别只是入口是 GUI。
 
 ## Phase 2：后台 review（已实现）
 
@@ -139,3 +157,5 @@ node tests/skills.test.js        # 单文件（有些沙箱里 --test 的逐文�
 回归用例覆盖了这些曾经会「静默失败」的点：description 的 YAML 转义（用宿主同一个 `yaml`
 包 round-trip 校验，见 `E:\dsh\work\_tmp\yaml-roundtrip.mjs`）、`patch` 里 `$&`/`$$` 不被当替换
 模式、技能名与宿主同规则、`old_string` 多处命中必须显式 `replace_all`、单条 `remove` 能清空记忆。
+0.4.0 的 `tests/web.test.js` 另覆盖面板 API：state 形状、add/patch/remove 往返、非法输入不改数据、
+pending 批准按 pin 重放、stale 拒绝并保留记录、缺 pin 的旧记录 fail-closed，以及回环守卫的七种场景。

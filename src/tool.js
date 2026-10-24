@@ -12,13 +12,15 @@
  *
  * 失败（MemoryError）作为普通结果返回，不抛异常——DSH 里抛异常会中断这一轮。
  */
-import fs from 'node:fs';
-import path from 'node:path';
-
 import { DESTRUCTIVE_ACTIONS, MemoryError, PATCH_DROP_HINT } from './store.js';
 import { isReviewSession, sessionIdFromExec } from './review-registry.js';
+import {
+  applyRecord,
+  createPendingStore,
+  hasDestructive,
+  summarizePending,
+} from './pending.js';
 
-const PENDING_ID_RE = /^[a-z0-9-]+$/;
 const WIRE_ACTIONS = ['add', 'patch', 'remove'];
 
 export const REPLACE_REMOVED =
@@ -122,75 +124,14 @@ function checkTarget(store, target) {
   store.assertTarget(target);
 }
 
-/**
- * 待确认队列。记录两种形状：
- *   单条 destructive：{id, created_at, target, action, old_text, content?, matched_entry}
- *   batch：          {id, created_at, target, action:'batch', operations:[...每个 op 带 matched_entry]}
- */
-function createPendingStore(dir) {
-  const enabled = typeof dir === 'string' && dir.length > 0;
-
-  function read(id) {
-    const file = path.join(dir, `${id}.json`);
-    try {
-      return { file, record: JSON.parse(fs.readFileSync(file, 'utf8')) };
-    } catch {
-      return undefined;
-    }
-  }
-
-  return {
-    enabled,
-    save(record) {
-      fs.mkdirSync(dir, { recursive: true });
-      const id = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
-      const full = { id, created_at: new Date().toISOString(), ...record };
-      fs.writeFileSync(path.join(dir, `${id}.json`), `${JSON.stringify(full, null, 2)}\n`, 'utf8');
-      return { id, record: full };
-    },
-    list() {
-      let names = [];
-      try {
-        names = fs.readdirSync(dir).filter((name) => name.endsWith('.json'));
-      } catch {
-        return [];
-      }
-      const items = [];
-      for (const file of names.sort()) {
-        const loaded = read(file.slice(0, -5));
-        if (loaded) items.push(loaded.record);
-      }
-      return items;
-    },
-    take(id) {
-      if (typeof id !== 'string' || !PENDING_ID_RE.test(id)) return undefined;
-      return read(id);
-    },
-    drop(file) {
-      try {
-        fs.rmSync(file, { force: true });
-      } catch {
-        /* 删不掉就留着，下一次 list 还会看到 */
-      }
-    },
-  };
-}
-
-function hasDestructive(operations) {
-  return operations.some((op) => op && typeof op === 'object' && DESTRUCTIVE_ACTIONS.has(op.action));
-}
 
 const STAGED_MESSAGE =
   'Background review may not delete memory entries unattended. The proposed %s was staged for your approval — ' +
   "review it with action='list_pending' (then 'apply_pending' to apply, 'discard_pending' to drop).";
 
-const PREDATES_PINNING =
-  'This destructive pending write predates entry pinning and cannot be verified; nothing was applied. Reject it ' +
-  'and recreate the change.';
-
-export function toolDefinition({ store, limits, pendingDir } = {}) {
+export function toolDefinition({ store, limits, pendingDir, pending: sharedPending } = {}) {
   if (!store) throw new Error('toolDefinition requires a store');
-  const pending = createPendingStore(pendingDir);
+  const pending = sharedPending ?? createPendingStore(pendingDir);
 
   function pendingUnavailable() {
     return { success: false, error: 'pending queue is unavailable (no pendingDir configured)' };
@@ -286,15 +227,7 @@ export function toolDefinition({ store, limits, pendingDir } = {}) {
   function applyPending(input) {
     if (!pending.enabled) return pendingUnavailable();
     if (input.action === 'list_pending') {
-      const items = pending.list().map((record) => ({
-        id: record.id,
-        created_at: record.created_at,
-        target: record.target,
-        action: record.action ?? record.op,
-        ...(record.action === 'batch' ? { operation_count: record.operations?.length ?? 0 } : {}),
-        ...(record.old_text === undefined ? {} : { old_text: record.old_text }),
-        ...(record.content === undefined ? {} : { content: record.content }),
-      }));
+      const items = pending.list().map(summarizePending);
       return { success: true, pending_count: items.length, pending: items };
     }
     if (input.action === 'discard_pending') {
@@ -309,28 +242,7 @@ export function toolDefinition({ store, limits, pendingDir } = {}) {
     if (!loaded) return { success: false, error: `no pending entry '${id}'; call action='list_pending' first` };
     const { record } = loaded;
     try {
-      store.assertTarget(record.target);
-      let result;
-      if (record.action === 'batch') {
-        const ops = Array.isArray(record.operations) ? record.operations : [];
-        const unpinned = ops.some((op) => DESTRUCTIVE_ACTIONS.has(op.action) && !op.matched_entry);
-        if (unpinned) return { success: false, error: PREDATES_PINNING };
-        result = store.applyBatch(record.target, ops);
-      } else {
-        const action = record.action ?? record.op;
-        if (DESTRUCTIVE_ACTIONS.has(action) && !record.matched_entry) {
-          return { success: false, error: PREDATES_PINNING };
-        }
-        if (action === 'patch') {
-          result = store.patch(record.target, record.old_text, record.content, record.matched_entry);
-        } else if (action === 'replace') {
-          result = store.replace(record.target, record.old_text, record.content, record.matched_entry);
-        } else if (action === 'remove') {
-          result = store.remove(record.target, record.old_text, record.matched_entry);
-        } else {
-          return { success: false, error: `pending record has unknown action '${action}'` };
-        }
-      }
+      const result = applyRecord(store, record);
       pending.drop(loaded.file);
       return { ...result, applied_pending: record.id };
     } catch (err) {

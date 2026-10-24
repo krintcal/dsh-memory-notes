@@ -13,11 +13,13 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { MemoryStore } from './src/store.js';
+import { createPendingStore } from './src/pending.js';
 import { createCurator } from './src/curator.js';
 import { createNudgeScheduler } from './src/nudge.js';
 import { createSkillLibrary } from './src/skills.js';
 import { skillToolDefinition } from './src/skill-tool.js';
 import { toolDefinition } from './src/tool.js';
+import { registerWebPanel } from './src/web.js';
 
 export const name = 'memory-notes';
 export const inject = ['tools', 'systemPrompt'];
@@ -67,14 +69,24 @@ export function apply(ctx, config = {}) {
     userCharLimit: config.userCharLimit ?? 1375,
   });
 
+  const pendingDir = config.pendingDir ?? path.join(store.dir, 'pending');
+  // tool 与面板共用同一个待确认队列：面板里看到的就是工具列表里的那批记录。
+  const pending = createPendingStore(pendingDir);
+
   ctx.tools.register(
     toolDefinition({
       store,
       limits: store.limits,
       // 后台 review 的破坏性写入落在这里，等主会话确认
-      pendingDir: config.pendingDir ?? path.join(store.dir, 'pending'),
+      pendingDir,
+      pending,
     }),
   );
+
+  // 左侧栏「记忆」面板的宿主半边（可选服务 webServer，CLI 宿主没有就自动跳过）。
+  if (config.webPanelEnabled !== false) {
+    registerWebPanel(ctx, { store, pending });
+  }
 
   // Phase 3：技能写入（自我进化的「写」半边；读的技能索引仍由 DSH 自带 skills 提供方负责）。
   let library;

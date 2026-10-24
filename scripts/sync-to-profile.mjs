@@ -53,7 +53,7 @@ function syncTree(fromDir, toDir) {
   }
 }
 
-for (const file of ['index.js', 'cordis.patch.yml', 'README.md', 'icon.svg', 'package.json']) {
+for (const file of ['index.js', 'client.js', 'cordis.patch.yml', 'README.md', 'icon.svg', 'package.json']) {
   const from = path.join(repo, file);
   if (existsSync(from)) copyOne(from, path.join(profileDir, file));
 }
