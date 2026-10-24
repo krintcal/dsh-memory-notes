@@ -73,7 +73,8 @@ test('第 9 个回合不触发，第 10 个回合触发且只触发一次', asyn
   assert.equal(calls[0].provider, 'fork');
   assert.equal(calls[0].delivery, 'caller');
   assert.equal(calls[0].request.parent.id, 'session-a');
-  assert.match(calls[0].request.prompt[0].text, /memory 工具/);
+  assert.match(calls[0].request.prompt[0].text, /memory tool/);
+  assert.match(calls[0].request.prompt[0].text, /\*\*Skills\*\*/);
   scheduler.dispose();
 });
 

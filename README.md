@@ -8,7 +8,7 @@ Hermes 式长期记忆的 DSH Host 插件。它给模型一个 `memory` 工具�
   - `<dshHome>/memories/MEMORY.md` —— 模型自己的笔记；
   - `<dshHome>/memories/USER.md` —— 用户画像 / 偏好 / 期望。
 - 配额按字符计：`memory` 默认 2200，`user` 默认 1375，含分隔符。超限直接拒绝写入，绝不截断。
-- `memory` 工具支持 `add` / `replace` / `remove`，或用 `operations` 数组做原子批处理（配额只按最终结果校验，所以可以先删后加）。
+- `memory` 工具支持 `add` / `patch` / `remove`，或用 `operations` 数组做原子批处理（配额只按最终结果校验，所以可以先删后加）。`patch` 只替换条目内的一个 span，条目其余保留；整条重写就把整条放进 `old_text`。
 - 系统提示里的记忆块在**会话开始时冻结**：本会话内的写入不会改变已注入的文本，改动从下一个会话开始可见（prompt-cache 语义）。
 
 ## 安装
@@ -38,6 +38,8 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
 | `userCharLimit` | `1375` | `USER.md` 配额 |
 | `nudgeInterval` | `10` | 每多少个回合触发一次后台 review |
 | `reviewEnabled` | `true` | 关掉后台 review |
+| `memoryEnabled` | `true` | 后台 review 里是否包含记忆回顾 |
+| `reviewPrompt` | — | 覆盖后台 review 的提示词全文 |
 | `provider` | `fork` | review 子会话用 `fork`（继承父上下文）还是 `spawn` |
 | `skillsDir` | `$DSH_SKILLS_DIR` → `~/.agents/skills` | `skill_manage` 写技能的位置 |
 | `skillsEnabled` | `true` | 关掉 `skill_manage` 工具 |
@@ -58,9 +60,25 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
 1. **技能写入必须先读**：`patch` / `delete` / `write_file` 之前必须 `action=read` 过同一技能，
    且读完之后文件没被改过（比对 sha256）。没读过 → `read the skill first`；读过但内容变了 →
    `changed on disk since you read it`。`strictReadBeforeWrite: false` 可关。
-2. **后台 review 不能直接改已有条目**：review fork 只允许 `action=add`；要合并或删除已有条目时
-   必须 `action=stage`（`op=replace|remove`），记录落在 `pendingDir`，由主会话 `list_pending` 看完再
+2. **后台 review 不能直接改已有条目**：review fork 里 `add` 照常直写，但 `patch` / `remove`（含 batch
+   里出现这两种）会被自动转成 stage 提案，记录落在 `pendingDir`，由主会话 `list_pending` 看完再
    `apply_pending` 落盘。排队期间磁盘完全不变。
+
+## 0.3.0：对齐 Hermes Agent 0.22.5
+
+对标上游 `tools/memory_tool.py` / `memory_tool_store.py` 的语义变更：
+
+- **`replace` 从模型面下线**：模型调用会拿到「use 'patch'」的报错；`patch` 用 `old_text` 精确定位条目内
+  的 span 并只替换它（span 在条目内必须唯一，否则报「appears N times … include more surrounding text」），
+  条目其余保留，成功时额外返回 `patched_entry_before/after`。`replace` 只保留给 0.2.0 的旧 pending 记录重放。
+- **错误语义对齐**：超限文案区分 add / patch / replace 三种、batch 错误带 `Operation N (action)` 前缀、
+  `No entry matched` 附带 `closest_entries`、多命中附 `matches`（每条截 80 字符）。
+- **staged 写入带 pin**：stage 时把命中的**完整条目**记进 `matched_entry`，批准时按它精确定位——审阅期间
+  条目变了就报 `changed since it was staged` 并保留记录；0.2.0 之前没有 pin 的旧记录会被拒绝重放。
+- **pending 队列补齐**：`list_pending` / `apply_pending` / 新增 `discard_pending`（对应上游 `/memory pending`
+  的 approve/discard）；batch 也能整批 stage 后一次批准。
+- **review 提示词对齐** `agent/background_review.py`：默认用合并版（Memory 双库路由 + Skills「Be ACTIVE」），
+  文案、偏好序、read-before-write 要求、不该捕获清单都按上游移植；工具名换成本插件的 `memory` / `skill_manage`。
 
 ## Phase 2：后台 review（已实现）
 

@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { apply } from '../index.js';
+import { clearReviewSession, markReviewSession } from '../src/review-registry.js';
 
 function freshDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'mem-plugin-'));
@@ -74,7 +75,7 @@ test('超限返回 success:false 与 current_entries', () => {
   assert.equal(res.success, false);
   assert.match(res.error, /would exceed the limit/);
   assert.ok(Array.isArray(res.current_entries));
-  assert.equal(res.usage, '10/30 chars');
+  assert.equal(res.usage, '10/30');
 });
 
 test('batch：先删后加通过，中途失败则磁盘不变', () => {
@@ -205,7 +206,7 @@ test('stage → list_pending → apply_pending：后台只排队，主会话才�
   const listed = tool.execute({ action: 'list_pending' }, {});
   assert.equal(listed.success, true);
   assert.equal(listed.pending_count, 1);
-  assert.equal(listed.pending[0].op, 'replace');
+  assert.equal(listed.pending[0].action, 'replace');
   assert.equal(listed.pending[0].old_text, '旧的事实');
 
   const applied = tool.execute({ action: 'apply_pending', pending_id: staged.pending_id }, {});
@@ -225,10 +226,78 @@ test('stage 参数不全 / apply 不存在的 id 都返回错误而不是抛异�
   assert.equal(traversal.success, false);
 });
 
-test('主会话直接 replace 仍然可用（staging 只对后台任务约定）', () => {
+test('replace 已下线：模型面改用 patch，报错指向 patch', () => {
   const { dir, tool } = setup();
   tool.execute({ target: 'user', action: 'add', content: '喜欢简短回答' }, {});
   const res = tool.execute({ target: 'user', action: 'replace', old_text: '简短', content: '极简短' }, {});
-  assert.equal(res.success, true);
-  assert.match(fs.readFileSync(path.join(dir, 'USER.md'), 'utf8'), /极简短/);
+  assert.equal(res.success, false);
+  assert.match(res.error, /not available; use 'patch'/);
+  assert.match(fs.readFileSync(path.join(dir, 'USER.md'), 'utf8'), /喜欢简短回答/, '拒绝时不落盘');
+});
+
+test('patch 只换条目内的一个 span，其余保留', () => {
+  const { dir, tool } = setup();
+  tool.execute({ target: 'user', action: 'add', content: '喜欢简短回答，不要寒暄' }, {});
+  const res = tool.execute({ target: 'user', action: 'patch', old_text: '简短', content: '极简短' }, {});
+  assert.equal(res.success, true, JSON.stringify(res));
+  assert.equal(fs.readFileSync(path.join(dir, 'USER.md'), 'utf8'), '喜欢极简短回答，不要寒暄');
+  assert.equal(res.patched_entry_after, '喜欢极简短回答，不要寒暄');
+  // span 在条目内出现多次 → 拒绝并提示加长
+  tool.execute({ target: 'memory', action: 'add', content: 'aa aa' }, {});
+  const dup = tool.execute({ target: 'memory', action: 'patch', old_text: 'a', content: 'b' }, {});
+  assert.equal(dup.success, false);
+  assert.match(dup.error, /appears 4 times/);
+  // content 为空 → 指向 remove
+  const empty = tool.execute({ target: 'memory', action: 'patch', old_text: 'aa aa', content: '' }, {});
+  assert.equal(empty.success, false);
+  assert.match(empty.error, /'remove' deletes the whole entry/);
+});
+
+test('batch 里的 patch 与 add 一起原子提交', () => {
+  const { dir, tool } = setup({ memoryCharLimit: 60 });
+  tool.execute({ target: 'memory', action: 'add', content: 'aaa bbb ccc' }, {});
+  const res = tool.execute(
+    { target: 'memory', operations: [{ action: 'patch', old_text: 'bbb', content: 'ddd' }, { action: 'add', content: 'more' }] },
+    {},
+  );
+  assert.equal(res.success, true, JSON.stringify(res));
+  assert.match(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8'), /aaa ddd ccc/);
+});
+
+test('后台 review（unattended）的破坏性写入自动转 stage，add 仍直写', () => {
+  const { dir, tool } = setup();
+  tool.execute({ target: 'memory', action: 'add', content: 'old fact' }, {});
+  const exec = { session: { id: 'review-child' } };
+  markReviewSession('review-child');
+  try {
+    const added = tool.execute({ target: 'memory', action: 'add', content: 'background note' }, exec);
+    assert.equal(added.success, true, 'add 在后台仍然直写');
+
+    const staged = tool.execute({ target: 'memory', action: 'patch', old_text: 'old fact', content: 'new fact' }, exec);
+    assert.equal(staged.success, true, JSON.stringify(staged));
+    assert.equal(staged.proposal_staged, true);
+    assert.match(staged.pending_id, /^[a-z0-9-]+$/);
+    const before = fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8');
+    assert.match(before, /old fact/);
+    assert.doesNotMatch(before, /new fact/);
+
+    assert.equal(tool.execute({ action: 'list_pending' }, {}).pending_count, 1);
+
+    // 审阅期间条目被主会话改掉 → 批准时 stale 拒绝，pending 记录保留
+    tool.execute({ target: 'memory', action: 'patch', old_text: 'old fact', content: 'changed fact' }, {});
+    const applied = tool.execute({ action: 'apply_pending', pending_id: staged.pending_id }, {});
+    assert.equal(applied.success, false);
+    assert.match(applied.error, /changed since it was staged/);
+    assert.equal(tool.execute({ action: 'list_pending' }, {}).pending_count, 1, 'stale 后记录不丢');
+
+    const discarded = tool.execute({ action: 'discard_pending', pending_id: staged.pending_id }, {});
+    assert.equal(discarded.success, true);
+    assert.equal(tool.execute({ action: 'list_pending' }, {}).pending_count, 0);
+  } finally {
+    clearReviewSession('review-child');
+  }
+  // 解除登记后主会话直写
+  const direct = tool.execute({ target: 'memory', action: 'patch', old_text: 'changed fact', content: 'final' }, exec);
+  assert.equal(direct.success, true);
+  assert.match(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8'), /final/);
 });

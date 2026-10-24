@@ -23,7 +23,7 @@ export const name = 'memory-notes';
 export const inject = ['tools', 'systemPrompt'];
 
 const SNAPSHOT_NOTE =
-  'Persistent memory loaded at session start. Use the memory tool to add, replace, or remove entries; writes apply to the next session.';
+  'Persistent memory loaded at session start. Use the memory tool to add, patch, or remove entries; writes apply to the next session. A background review may propose destructive edits, which wait in the pending queue for approval.';
 
 function resolveDir(config) {
   if (typeof config.dir === 'string' && config.dir) return config.dir;
@@ -168,6 +168,9 @@ export function apply(ctx, config = {}) {
         stateFile: config.stateFile,
         nudgeInterval: config.nudgeInterval ?? 10,
         provider: config.provider ?? 'fork',
+        memoryEnabled: config.memoryEnabled !== false,
+        skillsEnabled: config.skillsEnabled !== false,
+        prompt: config.reviewPrompt,
       },
     });
     ctx.effect(() => () => scheduler.dispose());

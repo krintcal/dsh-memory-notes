@@ -46,7 +46,7 @@ test('超限拒绝写入，报错带 current_entries 与 usage', () => {
   }
   assert.ok(err instanceof MemoryError);
   assert.match(err.message, /would exceed the limit/);
-  assert.equal(err.detail.usage, '10/30 chars');
+  assert.equal(err.detail.usage, '10/30');
   assert.deepEqual(err.detail.current_entries, ['aaaaaaaaaa']);
   // 拒绝后磁盘未被修改
   assert.deepEqual(new MemoryStore({ dir: store.dir }).load('memory'), ['aaaaaaaaaa']);
@@ -56,7 +56,7 @@ test('重复 add 不产生重复条目', () => {
   const store = freshStore();
   store.add('memory', 'same');
   const res = store.add('memory', 'same');
-  assert.match(res.note, /already exists/);
+  assert.match(res.message, /already exists/);
   assert.equal(store.entries('memory').length, 1);
 });
 
@@ -100,7 +100,7 @@ test('batch 失败时整体不落盘', () => {
         { action: 'add', content: 'temporary' },
         { action: 'remove', old_text: 'not-there' },
       ]),
-    /matched 0 entries/,
+    /No entry matched/,
   );
   assert.deepEqual(store.entries('memory'), ['keep me']);
   assert.deepEqual(new MemoryStore({ dir: store.dir }).load('memory'), ['keep me']);
