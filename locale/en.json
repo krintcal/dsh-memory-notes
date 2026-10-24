@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Memory Notes",
+    "description": "Hermes-style long-term memory: two plain-text stores injected as a frozen prompt snapshot, edited through one memory tool."
+  }
+}
