@@ -400,6 +400,196 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/* ----------------------------- tool call rows ---------------------------- */
+
+		// 每次 memory / skill_manage 调用在会话流里显示一行提示（🧠 已记住 · MEMORY 82%），
+		// 对应 Hermes 的 "💾 Memory updated"；点开看完整内容与结果 JSON。
+
+		const toolRowStyle = {
+			display: "flex",
+			alignItems: "flex-start",
+			gap: "7px",
+			padding: "3px 2px",
+			borderRadius: "6px",
+			cursor: "pointer",
+			fontSize: "12px",
+			lineHeight: "1.45",
+			userSelect: "none",
+		};
+		const toolRowBody = { display: "flex", flexDirection: "column", gap: "1px", minWidth: 0, flex: "1 1 auto" };
+		const toolRowTail = { marginLeft: "auto", opacity: 0.5, fontSize: "11px", whiteSpace: "nowrap" };
+		const toolRowMeta = { opacity: 0.62, fontSize: "11px" };
+		const toolRowDetails = {
+			margin: "0 0 6px 24px",
+			display: "flex",
+			flexDirection: "column",
+			gap: "5px",
+			fontSize: "12px",
+			lineHeight: "1.5",
+			opacity: 0.88,
+			whiteSpace: "pre-wrap",
+			wordBreak: "break-word",
+		};
+		const errorText = { color: "#d9534f" };
+
+		function clipText(value, max) {
+			if (typeof value !== "string") return "";
+			const text = value.replace(/\s+/g, " ").trim();
+			if (text.length <= max) return text;
+			return `${text.slice(0, Math.max(0, max - 1))}…`;
+		}
+
+		function callArguments(block) {
+			if (!block || typeof block !== "object") return {};
+			if (block.args && typeof block.args === "object" && !Array.isArray(block.args)) return block.args;
+			const raw = block.call && typeof block.call.argsRaw === "string" ? block.call.argsRaw : block.argsRaw;
+			if (typeof raw !== "string" || raw.trim() === "") return {};
+			try {
+				const value = JSON.parse(raw);
+				return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+			} catch {
+				return {};
+			}
+		}
+
+		function callErrorText(block) {
+			if (!block || typeof block !== "object" || !block.error || typeof block.error !== "object") return "";
+			return String(block.error.reason || block.error.message || block.error.code || "");
+		}
+
+		function resultPayload(block) {
+			if (!block || typeof block !== "object" || !Array.isArray(block.content)) return null;
+			const text = block.content
+				.filter((part) => part && part.type === "text" && typeof part.text === "string")
+				.map((part) => part.text)
+				.join("\n")
+				.trim();
+			if (text === "" || (text[0] !== "{" && text[0] !== "[")) return null;
+			try {
+				const value = JSON.parse(text);
+				return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+			} catch {
+				return null;
+			}
+		}
+
+		function memoryCallView(args, result, failed, failureText) {
+			const action = typeof args.action === "string" ? args.action : Array.isArray(args.operations) ? "operations" : "";
+			const target = typeof args.target === "string" ? args.target : "";
+			const where = target === "user" ? "USER" : target === "memory" ? "MEMORY" : "";
+			const usage = result && typeof result.usage === "string" ? result.usage : "";
+			const suffix = [where, usage].filter(Boolean).join(" · ");
+			if (failed) {
+				const reason = (result && (result.error || result.message)) || failureText || "未知错误";
+				return { icon: "🧠", headline: "记忆写入失败", detail: clipText(String(reason), 160), failed: true };
+			}
+			if (!result) {
+				const headline = {
+					add: "正在记住一条新记忆",
+					patch: "正在修改一条记忆",
+					remove: "正在删除一条记忆",
+					operations: "正在批量更新记忆",
+				}[action] || "正在更新记忆";
+				return { icon: "🧠", headline, detail: [where, clipText(args.content || args.old_text, 60)].filter(Boolean).join(" · ") };
+			}
+			if (result.staged) return { icon: "🧠", headline: "记忆修改已提交，等待确认", detail: clipText(result.message, 160) };
+			switch (action) {
+				case "add":
+					return { icon: "🧠", headline: `已记住${suffix ? ` · ${suffix}` : ""}`, detail: clipText(args.content, 90) };
+				case "patch":
+					return {
+						icon: "🧠",
+						headline: `已更新一条记忆${suffix ? ` · ${suffix}` : ""}`,
+						detail: clipText(`${args.old_text || ""} → ${args.content || ""}`, 120),
+					};
+				case "remove":
+					return { icon: "🧠", headline: `已删除一条记忆${suffix ? ` · ${suffix}` : ""}`, detail: clipText(args.old_text, 120) };
+				case "operations":
+					return {
+						icon: "🧠",
+						headline: `已批量更新 ${Array.isArray(args.operations) ? args.operations.length : 0} 条${suffix ? ` · ${suffix}` : ""}`,
+					};
+				case "list_pending": {
+					const count = typeof result.pending_count === "number" ? result.pending_count : Array.isArray(result.pending) ? result.pending.length : 0;
+					return { icon: "🧠", headline: `待确认修改 ${count} 项` };
+				}
+				case "apply_pending":
+					return { icon: "🧠", headline: "已应用待确认修改", detail: clipText(result.message, 120) };
+				case "discard_pending":
+					return { icon: "🧠", headline: "已丢弃待确认修改" };
+				default:
+					return { icon: "🧠", headline: "记忆已更新", detail: suffix };
+			}
+		}
+
+		function skillCallView(args, result, failed, failureText) {
+			const action = typeof args.action === "string" ? args.action : "";
+			const skillName = typeof args.name === "string" ? args.name : "";
+			if (failed) {
+				const reason = (result && (result.error || result.message)) || failureText || "未知错误";
+				return { icon: "📚", headline: "技能操作失败", detail: clipText(String(reason), 160), failed: true };
+			}
+			if (!result) {
+				return { icon: "📚", headline: action === "read" ? "正在读取技能" : "正在更新技能库", detail: skillName };
+			}
+			const label = {
+				create: "已创建技能",
+				patch: "已更新技能",
+				delete: "已删除技能",
+				write_file: "已写入技能文件",
+				read: "已读取技能",
+				list: "技能列表",
+			}[action] || "技能库已更新";
+			return {
+				icon: "📚",
+				headline: `${label}${skillName ? ` · ${skillName}` : ""}`,
+				detail: clipText(result.message || result.name || "", 120),
+			};
+		}
+
+		function makeToolRow(viewFn) {
+			return function ToolCallRow({ block }) {
+				const [open, setOpen] = react.useState(false);
+				const settled = !!(block && typeof block === "object" && "kind" in block);
+				const args = callArguments(block);
+				const result = settled ? resultPayload(block) : null;
+				const failed = settled && ((result && result.success === false) || block.isError === true);
+				const view = viewFn(args, result, failed, callErrorText(block));
+				const details = [];
+				const actionLine = [args.action, args.target ? `目标 ${args.target}` : ""].filter(Boolean).join(" · ");
+				if (actionLine) details.push(`动作：${actionLine}`);
+				if (typeof args.content === "string" && args.content.trim() !== "") details.push(`内容：${args.content}`);
+				if (typeof args.old_text === "string" && args.old_text.trim() !== "") details.push(`原片段：${args.old_text}`);
+				if (Array.isArray(args.operations)) details.push(`批量操作：${args.operations.length} 项`);
+				if (result) details.push(`结果：${JSON.stringify(result, null, 2).slice(0, 1600)}`);
+				return h(
+					"div",
+					null,
+					h(
+						"div",
+						{
+							style: toolRowStyle,
+							role: "button",
+							title: open ? "收起" : "查看详情",
+							onClick: () => setOpen(!open),
+						},
+						h("span", { style: { fontSize: "13px", lineHeight: "18px" } }, view.icon),
+						h(
+							"span",
+							{ style: toolRowBody },
+							h("span", { style: view.failed ? errorText : undefined }, view.headline),
+							view.detail ? h("span", { style: toolRowMeta }, view.detail) : null,
+						),
+						h("span", { style: toolRowTail }, open ? "收起" : "详情"),
+					),
+					open ? h("div", { style: toolRowDetails }, details.length > 0 ? details.join("\n") : "（暂无详情）") : null,
+				);
+			};
+		}
+
+		const MemoryToolRow = makeToolRow(memoryCallView);
+		const SkillToolRow = makeToolRow(skillCallView);
+
 		/* ------------------------------- registration ---------------------------- */
 
 		const PANEL_ID = "memory-notes";
@@ -465,15 +655,56 @@ window.__ModuleLoader__.load({
 			};
 		}
 
+		function registerToolViews(ctx) {
+			const slots = ctx.slots;
+			if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") return () => {};
+			const disposers = [];
+			disposers.push(
+				slots.inject("tool.call.toolview", () =>
+					slots.register({ name: "tool.call.toolview", key: "memory" }, MemoryToolRow),
+				),
+			);
+			disposers.push(
+				slots.inject("tool.call.toolview", () =>
+					slots.register({ name: "tool.call.toolview", key: "skill_manage" }, SkillToolRow),
+				),
+			);
+			return () => {
+				for (const dispose of disposers.splice(0)) {
+					try {
+						dispose();
+					} catch {
+						/* 卸载失败不该影响宿主 */
+					}
+				}
+			};
+		}
+
 		function apply(ctx) {
-			let dispose = () => {};
+			const disposers = [];
 			try {
-				dispose = registerPanel(ctx);
+				disposers.push(registerPanel(ctx));
 			} catch (err) {
 				console.warn("[dsh-memory-notes] panel registration failed:", err);
 			}
+			try {
+				disposers.push(registerToolViews(ctx));
+			} catch (err) {
+				console.warn("[dsh-memory-notes] tool row registration failed:", err);
+			}
 			if (typeof ctx.effect === "function") {
-				ctx.effect(() => () => dispose(), "memory-notes: ui mounts");
+				ctx.effect(
+					() => () => {
+						for (const dispose of disposers.splice(0)) {
+							try {
+								dispose();
+							} catch {
+								/* ignore */
+							}
+						}
+					},
+					"memory-notes: ui mounts",
+				);
 			}
 		}
 

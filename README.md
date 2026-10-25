@@ -107,6 +107,22 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
 - **面板自动刷新**：打开期间每 10 秒轮询一次，并在窗口 `focus` / 标签页重新可见时刷新；自动刷新失败静默丢弃，不覆盖界面。
 - **drop 失败可感知**：pending 的 `drop()` 返回 boolean；apply / discard 成功后若文件没删掉，响应带 `drop_failed: true`。
 
+## 0.5.0：会话流里的记忆提示
+
+Hermes 的终端会打印 `💾 Memory updated`；DSH 的等价面是**每次工具调用那一行**。0.5.0 用客户端的
+per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默认行）把 `memory` 与
+`skill_manage` 的调用渲染成一行提示：
+
+- `memory`：运行中显示「正在记住一条新记忆 / 正在修改…」，完成后显示
+  「已记住 / 已更新一条记忆 / 已删除一条记忆 / 已批量更新 N 条」并带目标库与配额（`MEMORY 82% — 1,800/2,200 chars`）；
+  `patch` 显示 `old → new` 摘要；后台 review 转 stage 的写入显示「记忆修改已提交，等待确认」；
+  `list_pending` / `apply_pending` / `discard_pending` 各有对应文案；失败显示红字原因。
+- `skill_manage`：`create` / `patch` / `delete` / `write_file` / `read` / `list` 显示「已创建技能 · <name>」这类提示。
+- 点行（`详情` / `收起`）展开完整动作、原片段、写入内容与结果 JSON（截断 1600 字符）。
+- 组件只读 `block`（运行中 `{phase, args, argsRaw}`；已结束 `{kind, call:{argsRaw}, args, content, isError, error}`），
+  不做任何写入；结果 JSON 从 `content` 的 text block 解析，解析不出就只显示标题。
+- 注册走 `ctx.slots.inject("tool.call.toolview", …)`，和面板一起在 `ctx.effect` 的 cleanup 里逐个 dispose。
+
 ## Phase 2：后台 review（已实现）
 
 `src/nudge.js` 监听 `session/event` 的 `turn/end`，按 `nudgeInterval` 计数，到点用
