@@ -98,6 +98,15 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
   抽出后 `tool.js` 不再各自实现一份。
 - 面板写入与工具调用完全同语义（同一 `MemoryStore` 方法、同一超限/歧义/stale 错误文案），区别只是入口是 GUI。
 
+## 0.4.1
+
+- **写入校验补全**：`patch`、`replace` 与 batch 里的写入现在和 `add` 共用同一道 `§` 校验；内容里出现 `§` 直接抛 `MemoryError`，整批拒绝且不落盘，避免一条记忆被静默拆成多条。
+- **路由随插件卸载回收**：`registerWebPanel` 改用 `webCtx.effect(...)` 注册三条路由，cleanup 里逐个调用 `webServer.register` 返回的 disposer；拿不到 `webServer` 或没有 `register` 时保持静默。
+- **POST 强制 JSON**：`/write` 与 `/pending` 要求 `content-type` 以 `application/json` 开头（大小写不敏感，允许 `; charset=utf-8`），否则返回 415；GET 不校验。
+- **客户端依赖瘦身**：去掉 `@deepseek-ai/dsh-client-ui-layout`（面板只用 `slots`），同时删掉 layout 的空订阅。
+- **面板自动刷新**：打开期间每 10 秒轮询一次，并在窗口 `focus` / 标签页重新可见时刷新；自动刷新失败静默丢弃，不覆盖界面。
+- **drop 失败可感知**：pending 的 `drop()` 返回 boolean；apply / discard 成功后若文件没删掉，响应带 `drop_failed: true`。
+
 ## Phase 2：后台 review（已实现）
 
 `src/nudge.js` 监听 `session/event` 的 `turn/end`，按 `nudgeInterval` 计数，到点用

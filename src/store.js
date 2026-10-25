@@ -156,6 +156,15 @@ function overLimitMessage(newTotal, limit) {
   return `would put memory at ${fmt(newTotal)}/${fmt(limit)} chars: free at least ${fmt(newTotal - limit)} chars`;
 }
 
+/** 条目内容里出现 § 会静默变成多条记忆，所有写入口共用这一道校验。 */
+function validateContent(value, target) {
+  const normalized = text(value);
+  if (normalized.includes('§')) {
+    throw new MemoryError('Content must not contain the § delimiter or be a bare §.', { success: false, target });
+  }
+  return normalized;
+}
+
 export class MemoryStore {
   constructor({ dir, memoryCharLimit = 2200, userCharLimit = 1375 } = {}) {
     if (!dir) throw new Error('MemoryStore requires a dir');
@@ -395,9 +404,7 @@ export class MemoryStore {
   add(target, content) {
     const value = text(content).trim();
     if (!value) throw new MemoryError('Content cannot be empty.', { success: false, target });
-    if (value.includes(ENTRY_DELIMITER) || value === '§') {
-      throw new MemoryError('Content must not contain the § delimiter or be a bare §.', { success: false, target });
-    }
+    validateContent(value, target);
     const current = this.entries(target);
     if (current.includes(value)) return this.respond(target, 'Entry already exists (no duplicate added).');
     this.write(target, (entries) => {
@@ -432,6 +439,7 @@ export class MemoryStore {
     if (!value.trim()) {
       throw new MemoryError(`new_text cannot be empty. ${PATCH_DROP_HINT}`, { success: false, target });
     }
+    validateContent(value, target);
     let extra = {};
     this.write(target, (entries) => {
       const idx = this.locateIn(entries, needle, 'patch', matchedEntry);
@@ -470,6 +478,7 @@ export class MemoryStore {
     }
     const value = text(newContent).trim();
     if (!value) throw new MemoryError("new_content cannot be empty. Use 'remove' to delete entries.", { success: false, target });
+    validateContent(value, target);
     let previous;
     this.write(target, (entries) => {
       const idx = this.locateIn(entries, needle, 'replace', matchedEntry);
@@ -522,6 +531,7 @@ export class MemoryStore {
       }
       if (act === 'add') {
         if (!content) throw this.batchFailure(target, `${pos}: content is required.${note}`);
+        validateContent(content, target);
         if (!working.includes(content)) working.push(content);
         matched.push(null);
         continue;
@@ -537,6 +547,7 @@ export class MemoryStore {
             `(or use action='remove' to delete).${note}`,
         );
       }
+      if (act === 'replace') validateContent(content, target);
       if (act === 'patch' && !content.trim()) {
         throw this.batchFailure(
           target,
@@ -561,6 +572,7 @@ export class MemoryStore {
         matched.push(previous);
         continue;
       }
+      validateContent(content, target);
       const outcome = patchEntry(previous, oldText, content);
       if (outcome.error) throw this.batchFailure(target, `${pos}: ${outcome.error}${note}`);
       working.splice(idx, 1, outcome.patched);

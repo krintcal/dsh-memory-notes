@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import { MemoryStore } from '../src/store.js';
 import { createPendingStore, PENDING_ID_RE } from '../src/pending.js';
-import { createWebApi, isLoopbackRequest } from '../src/web.js';
+import { createWebApi, isLoopbackRequest, buildRoutes, registerWebPanel } from '../src/web.js';
 
 function fixture(opts = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-web-'));
@@ -136,4 +136,126 @@ test('isLoopbackRequest：回环放行，转发头/跨站/非回环地址拒绝'
     isLoopbackRequest(fakeRequest({ headers: { host: '127.0.0.1:9072', origin: 'http://127.0.0.1:9072' } })),
     true,
   );
+});
+
+function fakeResponse() {
+  return {
+    statusCode: undefined,
+    headers: undefined,
+    body: '',
+    writeHead(status, responseHeaders) {
+      this.statusCode = status;
+      this.headers = responseHeaders;
+    },
+    end(body) {
+      this.body = body;
+    },
+  };
+}
+
+function rawRequest({ method = 'GET', headers = {}, body = '' } = {}) {
+  return {
+    method,
+    socket: { remoteAddress: '127.0.0.1' },
+    headers: { host: '127.0.0.1:9072', ...headers },
+    async *[Symbol.asyncIterator]() {
+      if (body) yield Buffer.from(body);
+    },
+  };
+}
+
+async function callRoute(route, request) {
+  const res = fakeResponse();
+  await route.handler(request, res);
+  return { res, payload: res.body ? JSON.parse(res.body) : null };
+}
+
+function postRoute(api, name) {
+  const route = buildRoutes(api).find((item) => item.path === `/api/dsh-memory-notes/${name}`);
+  assert.ok(route, `route ${name} exists`);
+  return route;
+}
+
+test('POST 缺 content-type → 415', async () => {
+  const { api } = fixture();
+  const { res, payload } = await callRoute(
+    postRoute(api, 'write'),
+    rawRequest({
+      method: 'POST',
+      body: JSON.stringify({ target: 'memory', action: 'add', content: 'x' }),
+    }),
+  );
+  assert.equal(res.statusCode, 415);
+  assert.equal(payload.ok, false);
+  assert.match(payload.error, /content-type/);
+});
+
+test('POST text/plain → 415', async () => {
+  const { api } = fixture();
+  const { res, payload } = await callRoute(
+    postRoute(api, 'write'),
+    rawRequest({
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: JSON.stringify({ target: 'memory', action: 'add', content: 'x' }),
+    }),
+  );
+  assert.equal(res.statusCode, 415);
+  assert.equal(payload.ok, false);
+});
+
+test('POST application/json; charset=utf-8 正常写入', async () => {
+  const { store, api } = fixture();
+  const { res, payload } = await callRoute(
+    postRoute(api, 'write'),
+    rawRequest({
+      method: 'POST',
+      headers: { 'content-type': 'Application/JSON; charset=utf-8' },
+      body: JSON.stringify({ target: 'memory', action: 'add', content: 'hello' }),
+    }),
+  );
+  assert.equal(res.statusCode, 200);
+  assert.equal(payload.ok, true);
+  assert.deepEqual(store.entries('memory'), ['hello']);
+});
+
+test('registerWebPanel 通过 ctx.effect 注册路由，dispose 时调用每个 disposer', () => {
+  const { store, pending } = fixture();
+  const registered = [];
+  const disposed = [];
+  let effectLabel;
+  let cleanup;
+
+  const webCtx = {
+    webServer: {
+      register(route) {
+        registered.push(route);
+        return () => disposed.push(route.path);
+      },
+    },
+    effect(fn, label) {
+      effectLabel = label;
+      cleanup = fn();
+      return cleanup;
+    },
+  };
+
+  const ctx = {
+    inject(services, callback) {
+      assert.deepEqual(services, ['webServer']);
+      callback(webCtx);
+    },
+  };
+
+  registerWebPanel(ctx, { store, pending });
+  assert.match(String(effectLabel), /web routes/);
+  assert.equal(registered.length, 3);
+  assert.equal(disposed.length, 0);
+
+  cleanup();
+  assert.deepEqual(disposed.sort(), [
+    '/api/dsh-memory-notes/pending',
+    '/api/dsh-memory-notes/state',
+    '/api/dsh-memory-notes/write',
+  ]);
 });

@@ -146,13 +146,24 @@ export function createWebApi({ store, pending }) {
       const loaded = pending.take(id);
       if (!loaded) return { ok: false, error: `no pending entry '${id}'` };
       if (input.decision === 'discard') {
-        pending.drop(loaded.file);
-        return { ok: true, discarded_pending: id, state: this.state() };
+        const dropped = pending.drop(loaded.file);
+        return {
+          ok: true,
+          discarded_pending: id,
+          ...(dropped ? {} : { drop_failed: true }),
+          state: this.state(),
+        };
       }
       try {
         const result = applyRecord(store, loaded.record);
-        pending.drop(loaded.file);
-        return { ok: true, applied_pending: id, result, state: this.state() };
+        const dropped = pending.drop(loaded.file);
+        return {
+          ok: true,
+          applied_pending: id,
+          result,
+          ...(dropped ? {} : { drop_failed: true }),
+          state: this.state(),
+        };
       } catch (err) {
         if (err instanceof MemoryError) return { ok: false, error: err.message, ...err.detail };
         return { ok: false, error: err?.message ?? String(err) };
@@ -197,6 +208,13 @@ function handler(api, fn, method) {
         writeJson(res, 405, { ok: false, error: `method ${req.method} not allowed` });
         return;
       }
+      if (method === 'POST') {
+        const contentType = req.headers?.['content-type'];
+        if (typeof contentType !== 'string' || !contentType.trim().toLowerCase().startsWith('application/json')) {
+          writeJson(res, 415, { ok: false, error: 'content-type must be application/json' });
+          return;
+        }
+      }
       const body = method === 'POST' ? await readJsonBody(req) : undefined;
       writeJson(res, 200, fn(api, body));
     } catch (err) {
@@ -225,7 +243,27 @@ export function registerWebPanel(ctx, { store, pending }) {
     try {
       const server = webCtx.webServer ?? webCtx.get?.('webServer');
       if (!server || typeof server.register !== 'function') return;
-      for (const route of buildRoutes(api)) server.register(route);
+      const registerRoutes = () => {
+        const disposers = [];
+        for (const route of buildRoutes(api)) {
+          const dispose = server.register(route);
+          if (typeof dispose === 'function') disposers.push(dispose);
+        }
+        return () => {
+          for (const dispose of disposers.splice(0)) {
+            try {
+              dispose();
+            } catch {
+              /* 卸载失败不该影响宿主 */
+            }
+          }
+        };
+      };
+      if (typeof webCtx.effect === 'function') {
+        webCtx.effect(registerRoutes, 'dsh-memory-notes: web routes');
+      } else {
+        registerRoutes();
+      }
     } catch (err) {
       webCtx.logger?.warn?.(`dsh-memory-notes: web panel routes not registered: ${err?.message ?? err}`);
     }

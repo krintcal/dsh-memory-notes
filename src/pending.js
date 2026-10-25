@@ -65,8 +65,10 @@ export function createPendingStore(dir) {
     drop(file) {
       try {
         fs.rmSync(file, { force: true });
+        return true;
       } catch {
         /* 删不掉就留着，下一次 list 还会看到 */
+        return false;
       }
     },
   };

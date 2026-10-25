@@ -270,20 +270,40 @@ window.__ModuleLoader__.load({
 			const [busy, setBusy] = react.useState(false);
 			const [notice, setNotice] = react.useState("");
 
-			const refresh = react.useCallback(async () => {
+			const refresh = react.useCallback(async (silent = false) => {
 				try {
 					const data = await fetchJson(API.state);
 					setState(data);
 					setError("");
 					return data;
 				} catch (err) {
-					setError(err && err.message ? err.message : String(err));
+					if (!silent) setError(err && err.message ? err.message : String(err));
 					return null;
 				}
 			}, []);
 
 			react.useEffect(() => {
 				void refresh();
+			}, [refresh]);
+
+			react.useEffect(() => {
+				if (typeof window === "undefined" || typeof document === "undefined") return undefined;
+				const timer = setInterval(() => {
+					void refresh(true);
+				}, 10000);
+				const onFocus = () => {
+					void refresh(true);
+				};
+				const onVisibilityChange = () => {
+					if (document.visibilityState === "visible") void refresh(true);
+				};
+				window.addEventListener("focus", onFocus);
+				document.addEventListener("visibilitychange", onVisibilityChange);
+				return () => {
+					clearInterval(timer);
+					window.removeEventListener("focus", onFocus);
+					document.removeEventListener("visibilitychange", onVisibilityChange);
+				};
 			}, [refresh]);
 
 			const applyResult = react.useCallback(
@@ -434,16 +454,6 @@ window.__ModuleLoader__.load({
 					),
 				),
 			);
-			// 记住当前选中的面板：面板页自己不需要它，但保留与 layout 的同步点，
-			// 换面板时若宿主重挂载，状态不会错位。
-			try {
-				const layout = typeof ctx.get === "function" ? ctx.get("layout") : undefined;
-				if (layout && layout.panelInfo && typeof layout.panelInfo.subscribe === "function") {
-					disposers.push(layout.panelInfo.subscribe(() => {}));
-				}
-			} catch {
-				/* layout 是可选服务 */
-			}
 			return () => {
 				for (const dispose of disposers.splice(0)) {
 					try {

@@ -150,3 +150,34 @@ test('往返不一致时先备份再结构化（去重、丢空白）', () => {
   assert.equal(backups.length, 1, '漂移应留下 .bak.<ts>');
   assert.deepEqual(new MemoryStore({ dir: store.dir }).load('memory'), ['first note', 'third']);
 });
+
+test('patch 内容含 § 被拒绝且数据不变', () => {
+  const store = freshStore();
+  store.add('memory', 'alpha beta');
+  assert.throws(() => store.patch('memory', 'beta', 'beta\n§\ngamma'), MemoryError);
+  assert.deepEqual(store.entries('memory'), ['alpha beta']);
+  assert.deepEqual(new MemoryStore({ dir: store.dir }).load('memory'), ['alpha beta']);
+});
+
+test('batch 里 patch 内容含 § → 整批拒绝且数据不变', () => {
+  const store = freshStore();
+  store.add('memory', 'alpha beta');
+  assert.throws(
+    () =>
+      store.applyBatch('memory', [
+        { action: 'add', content: 'temporary' },
+        { action: 'patch', old_text: 'beta', content: 'beta\n§\ngamma' },
+      ]),
+    MemoryError,
+  );
+  assert.deepEqual(store.entries('memory'), ['alpha beta']);
+  assert.deepEqual(new MemoryStore({ dir: store.dir }).load('memory'), ['alpha beta']);
+});
+
+test('replace 内容含 § 被拒绝且数据不变', () => {
+  const store = freshStore();
+  store.add('memory', 'alpha beta');
+  assert.throws(() => store.replace('memory', 'alpha beta', 'x\n§\ny'), MemoryError);
+  assert.deepEqual(store.entries('memory'), ['alpha beta']);
+  assert.deepEqual(new MemoryStore({ dir: store.dir }).load('memory'), ['alpha beta']);
+});
