@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createNudgeScheduler, reviewPrompt } from '../src/nudge.js';
+import { createNudgeScheduler, deliverReviewNotice, reviewPrompt } from '../src/nudge.js';
 import { createReviewLog } from '../src/review-log.js';
 import { loadReviewState } from '../src/review-state.js';
 import { clearReviewSession, markReviewSession } from '../src/review-registry.js';
@@ -94,8 +94,11 @@ test('到点后捕获窗口前快照；finishReview 只结算窗口内的变化'
   assert.deepEqual(reviewLog.recent(1)[0].memory.added, ['fact learned during review']);
   assert.equal(loadReviewState(dir).turns_since_review, 0);
   assert.equal(scheduler.status().due, false);
-  assert.equal(injected.length, 1);
-  assert.match(injected[0].content[0].text, /记忆已更新/);
+  assert.ok(result.notice, 'expected a pending notice for the tool to defer');
+  assert.equal(result.notice.role, 'user');
+  assert.equal(result.notice.source.form, 'notice');
+  assert.match(result.notice.source.summary, /MEMORY \+1/);
+  assert.match(result.notice.content[0].text, /记忆已更新/);
   scheduler.dispose();
 });
 
@@ -151,21 +154,49 @@ test('计数持久化：新实例接着上一实例的进度', () => {
   scheduler2.dispose();
 });
 
-test("noticeMode:'off' 只记账本，不 inject；没有变化时提示未保存内容", async () => {
+test("noticeMode:'off' 只记账本，不生成 notice；没有变化时提示未保存内容", async () => {
   const { ctx, session, scheduler, reviewLog, injected } = setup({ interval: 1, noticeMode: 'off' });
   ctx.emit(...turnEnd(session));
-  scheduler.finishReview(session.id);
+  const off = scheduler.finishReview(session.id);
   assert.equal(reviewLog.count(), 1);
+  assert.equal(off.notice, undefined);
   assert.equal(injected.length, 0);
   scheduler.dispose();
 
   const on = setup({ interval: 1, noticeMode: 'on' });
   on.ctx.emit(...turnEnd(on.session));
-  on.scheduler.finishReview(on.session.id);
-  await tick();
-  assert.equal(on.injected.length, 1);
-  assert.match(on.injected[0].content[0].text, /没有需要保存的内容/);
+  const notice = on.scheduler.finishReview(on.session.id).notice;
+  assert.ok(notice);
+  assert.match(notice.content[0].text, /没有需要保存的内容/);
   on.scheduler.dispose();
+});
+
+test('deliverReviewNotice：优先 deferContext，退回 agent.inject，消息永不是 developer 角色', () => {
+  const message = {
+    id: 'notice-1',
+    role: 'user',
+    content: [{ type: 'text', text: '[memory-review] 记忆已更新' }],
+    source: { kind: 'memory-review', form: 'notice', summary: '记忆已更新' },
+  };
+  const deferred = [];
+  assert.equal(deliverReviewNotice(message, { deferContext: (m) => deferred.push(m) }), true);
+  assert.equal(deferred.length, 1);
+
+  const injected = [];
+  assert.equal(deliverReviewNotice(message, { agent: { inject: (m) => injected.push(m) } }), true);
+  assert.equal(injected.length, 1);
+
+  const failing = () => {
+    throw new Error('no tool execution');
+  };
+  const fallback = [];
+  assert.equal(
+    deliverReviewNotice(message, { deferContext: failing, agent: { inject: (m) => fallback.push(m) } }),
+    true,
+  );
+  assert.equal(fallback.length, 1);
+  assert.notEqual(message.role, 'developer');
+  assert.equal(deliverReviewNotice(message, {}), false);
 });
 
 test('dispose 后不再计数', () => {

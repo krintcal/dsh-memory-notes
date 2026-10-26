@@ -7,11 +7,13 @@
  *  - 到点的回合在内存里捕获「回顾窗口前」的 memory/user/key 条目快照；
  *  - 快照里提示主会话当轮完成回顾；
  *  - 主会话写完（直写或 suggest 入队）后调用 `memory_review_status complete`，
- *    这里再算 diff、写 review-log、inject 一条 developer 消息并清零计数。
+ *    这里再算 diff、写 review-log、给主会话附一条 user 角色的 notice 并清零计数。
  *
  * 三条硬约束：监听器里绝不抛异常；review/curator 子会话不计入；没 complete 就
  * 不清零（宁可下一次继续提示，也不假装回顾完成了）。
  */
+import { randomUUID } from 'node:crypto';
+
 import { isReviewSession } from './review-registry.js';
 import {
   createReviewLog,
@@ -86,23 +88,60 @@ function warn(message, error) {
   }
 }
 
-let warnedLlmImport = false;
+/** 折叠行的摘要上限，对齐宿主的 `boundContextSummary`。 */
+const SUMMARY_MAX_CHARS = 120;
 
-/** 优先用宿主的开发者消息构造函数；拿不到就回退普通对象（只 warn 一次）。 */
-async function developerMessage(text) {
-  try {
-    const mod = await import('@deepseek-ai/dsh-llm');
-    const create = mod?.createDeveloperMessage ?? mod?.default?.createDeveloperMessage;
-    if (typeof create === 'function') {
-      return create({ content: [{ type: 'text', text }], source: { kind: 'memory-review' } });
-    }
-  } catch (error) {
-    if (!warnedLlmImport) {
-      warnedLlmImport = true;
-      warn('@deepseek-ai/dsh-llm unavailable; using a plain developer message', error);
+function boundSummary(text) {
+  return text.length <= SUMMARY_MAX_CHARS ? text : `${text.slice(0, SUMMARY_MAX_CHARS - 1)}…`;
+}
+
+/**
+ * 构造给主会话的回顾提示：一条 user 角色的 `notice` 上下文消息。
+ *
+ * 不能用 developer 角色：`agent.inject` 与 `exec.deferContext` 走的都是 agent
+ * inbox 通道，inbox splice 只接受普通 user 消息——夹带 developer 角色会被 v4
+ * 会话格式拒绝（`developer/message and developer role must occur together`），
+ * 整个回合跟着失败。宿主自己注入这类提醒也是 createUserMessage +
+ * `source.form='notice'`（见 model-selection / tool-goal 的 notice）。
+ */
+export function buildReviewNotice(entry, mode = 'on') {
+  const base = reviewNoticeText(entry, mode);
+  return {
+    id: randomUUID(),
+    role: 'user',
+    content: [{ type: 'text', text: `[memory-review] ${base}` }],
+    source: { kind: 'memory-review', form: 'notice', summary: boundSummary(base) },
+  };
+}
+
+/**
+ * 投递回顾提示：优先 `exec.deferContext`（随工具结果进入下一步上下文），
+ * 退回 `agent.inject`（同样是 user 角色，不再触发开发者角色校验）。
+ * 任何投递失败都只 warn，不影响 review 结果与账本。
+ */
+export function deliverReviewNotice(message, { deferContext, agent } = {}) {
+  if (!message) return false;
+  if (typeof deferContext === 'function') {
+    try {
+      deferContext(message);
+      return true;
+    } catch (error) {
+      warn('failed to defer memory review notice', error);
     }
   }
-  return { role: 'developer', content: [{ type: 'text', text }], source: { kind: 'memory-review' } };
+  if (agent && typeof agent.inject === 'function') {
+    try {
+      const result = agent.inject(message);
+      if (result && typeof result.catch === 'function') {
+        void result.catch((error) => warn('failed to inject memory review notice', error));
+      }
+      return true;
+    } catch (error) {
+      warn('failed to inject memory review notice', error);
+    }
+  }
+  warn('no delivery channel for the memory review notice; skipping');
+  return false;
 }
 
 export function reviewNoticeText(entry, mode = 'on') {
@@ -122,26 +161,6 @@ export function reviewNoticeText(entry, mode = 'on') {
     if (lines.length >= 3) break;
   }
   return lines.length ? `${base}\n${lines.join('\n')}` : base;
-}
-
-/** 通过 agent.inject 推一条开发者消息；绝不用 followup / steer，避免多跑一轮模型。 */
-export async function notifyReview(agent, entry, mode = 'on') {
-  if (!agent || typeof agent.inject !== 'function') {
-    warn('no main-session agent to receive the memory review notice; skipping inject');
-    return false;
-  }
-  const text = reviewNoticeText(entry, mode);
-  const message = await developerMessage(text);
-  try {
-    const result = agent.inject(message);
-    if (result && typeof result.catch === 'function') {
-      await result.catch((error) => warn('failed to inject memory review notice', error));
-    }
-    return true;
-  } catch (error) {
-    warn('failed to inject memory review notice', error);
-    return false;
-  }
 }
 
 /** 读取 store 里参与快照的三轨；任何一轨读失败都退化成空数组。 */
@@ -164,7 +183,8 @@ export function snapshotStores(store) {
  *
  * 签名按任务书：finishReview(sessionId, store, reviewLog, noticeMode)。
  * options.before / startedAt 由调度器在到点时捕获；拿不到就按「窗口内没有变化」
- * 处理。仍然清零计数、写账本，并在 noticeMode 允许时通知主会话。
+ * 处理。仍然清零计数、写账本，并在 noticeMode 允许时返回一条待投递的 notice
+ * （投递交给 reviewTool 的 `exec.deferContext`，这里不做副作用）。
  */
 export function finishReview(sessionId, store, reviewLog, noticeMode = 'on', options = {}) {
   const id = typeof sessionId === 'string' && sessionId ? sessionId : 'unknown';
@@ -186,19 +206,10 @@ export function finishReview(sessionId, store, reviewLog, noticeMode = 'on', opt
         summary,
       })
     : undefined;
-  if (noticeMode !== 'off' && options.agent) {
-    void notifyReview(options.agent, entry ?? { ...diff, summary }, noticeMode);
-  }
+  const notice =
+    noticeMode === 'off' ? undefined : buildReviewNotice(entry ?? { ...diff, summary }, noticeMode);
   if (store?.dir) completeReview(store.dir, loadReviewState(store.dir));
-  return { sessionId: id, summary, entry };
-}
-
-function resolveAgent(ctx, sessionId) {
-  try {
-    return typeof ctx?.get === 'function' ? ctx.get('agents')?.get?.(sessionId) : undefined;
-  } catch {
-    return undefined;
-  }
+  return { sessionId: id, summary, entry, notice };
 }
 
 export function createNudgeScheduler({ ctx, store, config = {} }) {
@@ -239,7 +250,7 @@ export function createNudgeScheduler({ ctx, store, config = {} }) {
     status() {
       return reviewStatus(loadReviewState(dir), interval);
     },
-    /** 调度器内部结算：取出到点时捕获的 before，顺便解析主会话 agent。 */
+    /** 调度器内部结算：取出到点时捕获的 before；notice 交给工具层投递。 */
     finishReview(sessionId) {
       const id = typeof sessionId === 'string' && sessionId ? sessionId : 'unknown';
       const captured = pendingSnapshots.get(id);
@@ -247,7 +258,6 @@ export function createNudgeScheduler({ ctx, store, config = {} }) {
         const result = finishReview(id, store, reviewLog, noticeMode, {
           before: captured?.before,
           startedAt: captured?.startedAt,
-          agent: resolveAgent(ctx, id),
         });
         pendingSnapshots.delete(id);
         return result;

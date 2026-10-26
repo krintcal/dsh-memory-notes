@@ -143,16 +143,18 @@ per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默
 
 ### Phase 1：review 完成后的主会话提示
 
-后台 review 跑完后，`src/nudge.js` 会给主会话 `inject` 一条 developer 消息（不是普通 user 消息，
-不会污染对话历史里的用户意图），并在面板里留一条记录：
+后台 review 跑完后，`src/nudge.js` 会给主会话补一条 user 角色的 `notice` 上下文
+（不是 developer 消息，见 0.9.1 的说明），并在面板里留一条记录：
 
 - `noticeMode: 'on'`（默认）显示「记忆已更新」与两库计数，例如
   `MEMORY +1 ~0 -0 · USER +0 ~0 -0`；
 - `noticeMode: 'verbose'` 额外附最多 3 条变更预览（`+` 新增 / `-` 删除 / `~` 修改）；
 - `noticeMode: 'off'` 只记账本，不打扰主会话。
-- 提示走 `@deepseek-ai/dsh-llm` 的 `createDeveloperMessage`；宿主没导出时退化成同结构的
-  `{ role: 'developer', content: [{ type: 'text', text }], source: { kind: 'memory-review' } }`。
-- inject 失败只 `console.warn`，不影响 review 结果与账本。
+- 提示优先走工具上下文的 `exec.deferContext`（随 `memory_review_status` 的结果进入下一步，
+  客户端折叠成一行 notice）；宿主没给 `deferContext` 时退回 `agent.inject`。
+- 消息形状：`{ id, role: 'user', content: [{ type: 'text', text }], source: { kind: 'memory-review', form: 'notice', summary } }`，
+  显式字段避免命中 `createDeveloperMessage` / 旧版 developer 路径。
+- 投递失败只 `console.warn`，不影响 review 结果与账本。
 - 账本 `<dir>/review-log.json` 保留最近 50 条（`src/review-log.js`），记录 child/session id、
   channel（`review` / `curator`）、两库 before/after 与 `summary`。
 
@@ -207,6 +209,25 @@ per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默
   0.6 的近似告警更严），只提示不合并；`state.conflicts` 带 `{target, a, b, similarity}`，
   面板「疑似重复 · 需要人工合并」区块列出。
 - 语义与写入一致：合并写入走 `store.add`（禁 `§`、配额校验、注入粗筛、账本 `source:'sync'`）。
+
+## 0.9.1：修复 review 提示导致的「本轮运行失败」
+
+- **崩溃根因**：0.6.0 起 review 完成提示用 `agent.inject` 推 **developer 角色**消息。
+  `inject` 走的是 agent inbox 通道（append `agent/inbox/spliced`），而 inbox splice 只接受
+  普通 user 消息；持久化前的 v4 校验随即抛
+  `format v4 developer/message and developer role must occur together`，
+  异常从 `memory_review_status` 的 execute 冒到本轮，表现为 GUI 里那条「本轮运行失败」。
+  （developer 消息本身是合法事件，但只能用 `session.append('developer/message', …)` 且要求
+  当前 step 处于 open 状态，插件拿不到这个保证。）
+- **修法**：`src/nudge.js` 改成构造 user 角色的 `notice`：
+  `source = { kind: 'memory-review', form: 'notice', summary }`，正文前缀 `[memory-review] `；
+  `finishReview` 不再自己 inject，而是把 notice 返回给 `src/review-tool.js`，
+  由工具层的 `exec.deferContext(notice)` 随结果进入下一步上下文（`additionalContexts`）。
+  `exec.deferContext` 不可用或抛错时退回 `agent.inject(notice)`——同样是 user 角色，不会再触发校验。
+- **客户端呈现**：`form: 'notice'` 让 GUI 把提示折叠成一行上下文（与 model-selection /
+  tool-goal 的原生 notice 一致），摘要来自 `source.summary`（上限 120 字符）。
+- **测试**：`tests/nudge.test.js` 校验 notice 形状与投递优先级；
+  `tests/review-tool.test.js` 校验 `deferContext` 优先、`inject` 兜底、`noticeMode:'off'` 不投递。
 
 ## 0.8.0：面板鉴权、批量预览、安全件与 UI 打磨
 

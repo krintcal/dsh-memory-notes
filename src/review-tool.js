@@ -6,6 +6,7 @@
  * `complete` 只在真正完成回顾后调用；重复调用只会把计数清零（再次 complete
  * 的 diff 为空）。
  */
+import { deliverReviewNotice } from './nudge.js';
 import { sessionIdFromExec } from './review-registry.js';
 import { loadReviewState, reviewStatus } from './review-state.js';
 
@@ -78,6 +79,11 @@ export function reviewToolDefinition({ dir, interval, mode = 'suggest', suggesti
         if (action === 'status') return stateView();
         const sessionId = sessionIdFromExec(exec);
         const result = scheduler?.finishReview?.(sessionId);
+        // 回顾提示随工具结果进入下一步上下文：deferContext 注入 user 角色的
+        // notice（inbox 只接受 user 消息，developer 角色会让整回合失败）。
+        if (result?.notice) {
+          deliverReviewNotice(result.notice, { deferContext: exec?.deferContext, agent: exec?.agent });
+        }
         return {
           ...stateView(),
           summary: `回顾完成：${result?.summary ?? '没有需要保存的内容'}`,
