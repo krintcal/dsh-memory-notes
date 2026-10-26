@@ -191,6 +191,23 @@ per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默
   要求它把「可合并/可删除」的建议以 `stage` 动作提交，而不是直接改写技能库；
   默认 `'off'`，与 Hermes 的保守默认一致。
 
+## 0.9.0：记忆同步与疑似重复
+
+- **同步（导出/合并）** `src/sync.js`：把全部轨的条目打成 `dsh-memory-notes/v1` bundle
+  （`{format, device_id, exported_at, targets}`）。合并是保守的「三方基线 + 只加不删」：
+  - 本地 = 当前条目，远端 = bundle 条目，基线 = 上次合并后的条目集合（`<dir>/sync-state.json`）；
+  - 只有「远端新增、本地没有、基线也没有」才写入；单条失败（配额/校验）计入 `summary.skipped`，
+    不影响其他条目；
+  - 远端删除只报告（`remote_deleted`），默认不执行；本地删掉的条目不会被远端复活
+    （`local_deleted_kept`）；需要真删时调用方传 `applyDeletions: true`；
+  - 合并成功后把当前条目写回基线，下一次以它为参照；同一 bundle 重复合并幂等。
+- **面板入口**：`GET/POST /api/dsh-memory-notes/sync`（同样走 loopback + GUI token 鉴权），
+  面板新增「SYNC · 同步 / 迁移」区块：导出 JSON、粘贴另一台设备的 JSON 合并。
+- **疑似重复** `src/conflicts.js`：同一轨内两两计算 `similarity`（Jaccard，阈值 `0.8`，比写入时
+  0.6 的近似告警更严），只提示不合并；`state.conflicts` 带 `{target, a, b, similarity}`，
+  面板「疑似重复 · 需要人工合并」区块列出。
+- 语义与写入一致：合并写入走 `store.add`（禁 `§`、配额校验、注入粗筛、账本 `source:'sync'`）。
+
 ## 0.8.0：面板鉴权、批量预览、安全件与 UI 打磨
 
 - **面板路由接 GUI token 鉴权**：`registerWebPanel` 改为 `ctx.inject(['webServer','connection'])`，
@@ -352,4 +369,6 @@ curator 建议制与降级。0.7.0 新增 `tests/tracks.test.js`、`tests/review
 0.8.0 新增 `tests/web.test.js` 的授权拦截用例（401 拒绝 / 放行 / 无 connection fail-open / 批量预览摘要）、
 `tests/store.test.js` 的安全件用例（4 类注入文案、`threatScan:false`、batch、canonical、死锁 pid、owner.json）、
 `tests/curator.test.js` 的建议制 fork 用例。
-当前全量 **155 pass / 0 fail**。
+0.9.0 新增 `tests/sync.test.js`（导出/合并/基线/本地删除不复活/远端删除只报告/applyDeletions/配额跳过/格式校验）
+与 `findConflictGroups` 用例，`tests/web.test.js` 补 sync 两条路由、鉴权拦截与 `state.conflicts`。
+当前全量 **165 pass / 0 fail**。

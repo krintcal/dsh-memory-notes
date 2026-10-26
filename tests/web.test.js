@@ -257,7 +257,7 @@ test('registerWebPanel 通过 ctx.effect 注册路由，dispose 时调用每个 
 
   registerWebPanel(ctx, { store, pending });
   assert.match(String(effectLabel), /web routes/);
-  assert.equal(registered.length, 4);
+  assert.equal(registered.length, 5);
   assert.equal(disposed.length, 0);
 
   cleanup();
@@ -265,6 +265,7 @@ test('registerWebPanel 通过 ctx.effect 注册路由，dispose 时调用每个 
     '/api/dsh-memory-notes/pending',
     '/api/dsh-memory-notes/state',
     '/api/dsh-memory-notes/suggestions',
+    '/api/dsh-memory-notes/sync',
     '/api/dsh-memory-notes/write',
   ]);
 });
@@ -421,7 +422,7 @@ test('registerWebPanel 无 connection 服务时 fail-open（不阻断）', async
     },
   };
   registerWebPanel(ctx, { store, pending });
-  assert.equal(registered.length, 4);
+  assert.equal(registered.length, 5);
   const stateRoute = registered.find((route) => route.path.endsWith('/state'));
   const { res, payload } = await callRoute(stateRoute, rawRequest({ method: 'GET' }));
   assert.equal(res.statusCode, 200);
@@ -449,4 +450,66 @@ test('pending batch 摘要带 operations 预览（每条截 120 字符）', () =
   assert.ok(item.operations[0].content.length <= 120);
   assert.match(item.operations[0].content, /…$/);
   assert.equal(item.operations[1].action, 'remove');
+});
+
+/* ---------------------- 0.9.0：同步路由与疑似重复 ---------------------- */
+
+function syncRoute(api) {
+  const routes = buildRoutes(api).filter((item) => item.path === '/api/dsh-memory-notes/sync');
+  assert.equal(routes.length, 1, 'sync 同路径只注册一条路由（按 method 分派）');
+  return routes[0];
+}
+
+test('GET /sync 导出 bundle，POST /sync 合并远端条目', async () => {
+  const { store, api } = fixture();
+  store.add('memory', 'local fact');
+
+  const route = syncRoute(api);
+  const exported = await callRoute(route, rawRequest({ method: 'GET' }));
+  assert.equal(exported.res.statusCode, 200);
+  assert.equal(exported.payload.ok, true);
+  assert.equal(exported.payload.bundle.format, 'dsh-memory-notes/v1');
+  assert.deepEqual(exported.payload.bundle.targets.memory, ['local fact']);
+
+  const body = JSON.stringify({
+    format: 'dsh-memory-notes/v1',
+    device_id: 'dev-remote',
+    targets: { memory: ['local fact', 'remote fact'] },
+  });
+  const merged = await callRoute(
+    route,
+    rawRequest({ method: 'POST', headers: { 'content-type': 'application/json' }, body }),
+  );
+  assert.equal(merged.res.statusCode, 200);
+  assert.equal(merged.payload.ok, true);
+  assert.equal(merged.payload.added, 1);
+  assert.deepEqual(store.load('memory').sort(), ['local fact', 'remote fact']);
+  assert.equal(merged.payload.state.targets.memory.entries.length, 2);
+});
+
+test('GET /sync 未通过鉴权时被拦截', async () => {
+  const { api } = fixture();
+  const authorize = (req, res) => {
+    res.statusCode = 401;
+    res.end();
+    return true;
+  };
+  const routes = buildRoutes(api, { authorize });
+  const route = routes.find((item) => item.path === '/api/dsh-memory-notes/sync');
+  const { res } = await callRoute(route, rawRequest({ method: 'GET' }));
+  assert.equal(res.statusCode, 401);
+});
+
+test('state 带 conflicts：高度相似的两条并列时给出提示', () => {
+  const { store, api } = fixture();
+  store.add('memory', 'config lives in dsh home');
+  store.add('memory', 'config lives in dsh home directory');
+  store.add('memory', 'unrelated fact about hermes gateway');
+
+  const state = api.state();
+  assert.equal(state.conflicts.length >= 1, true);
+  const pair = state.conflicts[0];
+  assert.equal(pair.target, 'memory');
+  assert.equal(pair.similarity >= 0.8, true);
+  assert.match(pair.a + pair.b, /config lives in dsh home/);
 });

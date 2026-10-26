@@ -17,6 +17,7 @@ window.__ModuleLoader__.load({
 			write: "api/dsh-memory-notes/write",
 			pending: "api/dsh-memory-notes/pending",
 			suggestions: "api/dsh-memory-notes/suggestions",
+			sync: "api/dsh-memory-notes/sync",
 		};
 
 		async function fetchJson(url, body) {
@@ -447,6 +448,151 @@ window.__ModuleLoader__.load({
 
 		/* ---------------------------------- page --------------------------------- */
 
+		/* --------------------------- 同步与疑似重复 --------------------------- */
+
+		const TARGET_LABELS = {
+			memory: "MEMORY",
+			user: "USER",
+			key: "KEY",
+			project: "PROJECT",
+			daily: "DAILY",
+		};
+
+		const syncTextArea = {
+			width: "100%",
+			boxSizing: "border-box",
+			minHeight: "120px",
+			marginTop: "8px",
+			padding: "8px 10px",
+			fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
+			fontSize: "12px",
+			lineHeight: "1.45",
+			borderRadius: "8px",
+			border: "1px solid rgba(127,127,127,0.35)",
+			background: "transparent",
+			color: "inherit",
+			resize: "vertical",
+		};
+
+		// 0.9.0：把另一台设备的 bundle 合并进来。只加不删，删除只报告。
+		function SyncSection({ busy, onMerged }) {
+			const [text, setText] = react.useState("");
+			const [localBusy, setLocalBusy] = react.useState(false);
+			const [message, setMessage] = react.useState("");
+			const [failure, setFailure] = react.useState("");
+
+			const doExport = react.useCallback(async () => {
+				setLocalBusy(true);
+				setMessage("");
+				setFailure("");
+				try {
+					const data = await fetchJson(API.sync);
+					const bundle = data && data.bundle ? data.bundle : data;
+					setText(JSON.stringify(bundle, null, 2));
+					setMessage("已导出；复制这段 JSON 到另一台设备的输入框里合并。");
+				} catch (err) {
+					setFailure(err && err.message ? err.message : String(err));
+				} finally {
+					setLocalBusy(false);
+				}
+			}, []);
+
+			const doMerge = react.useCallback(async () => {
+				setLocalBusy(true);
+				setMessage("");
+				setFailure("");
+				try {
+					let bundle;
+					try {
+						bundle = JSON.parse(text);
+					} catch {
+						throw new Error("JSON 解析失败：请粘贴完整导出内容");
+					}
+					const data = await fetchJson(API.sync, bundle);
+					const added = typeof data.added === "number" ? data.added : 0;
+					setMessage(`合并完成：新增 ${added} 条；远端删除只报告不执行。`);
+					if (onMerged) await onMerged();
+				} catch (err) {
+					setFailure(err && err.message ? err.message : String(err));
+				} finally {
+					setLocalBusy(false);
+				}
+			}, [text, onMerged]);
+
+			return h(
+				"div",
+				{ style: card },
+				h(
+					"div",
+					{ style: { ...row, justifyContent: "space-between", marginBottom: "6px" } },
+					h("strong", null, "SYNC · 同步 / 迁移"),
+					h(
+						"div",
+						{ style: row },
+						h(
+							"button",
+							{ style: smallBtn, disabled: busy || localBusy, onClick: () => void doExport() },
+							"导出 JSON",
+						),
+						h(
+							"button",
+							{
+								style: smallBtn,
+								disabled: busy || localBusy || !text.trim(),
+								onClick: () => void doMerge(),
+							},
+							"合并导入",
+						),
+					),
+				),
+				h(
+					"div",
+					{ style: muted },
+					"安全合并：远端新增才写入；远端删除只报告、不执行；内容重复会在下面「疑似重复」里提示，手动处理。",
+				),
+				h("textarea", {
+					style: syncTextArea,
+					value: text,
+					placeholder: "粘贴另一台设备「导出 JSON」得到的内容…",
+					onChange: (event) => setText(event.target.value),
+					spellCheck: false,
+				}),
+				message ? h("div", { style: { ...muted, color: "#2e7d32", marginTop: "6px" } }, message) : null,
+				failure ? h("div", { style: { ...muted, color: "#b3261e", marginTop: "6px" } }, failure) : null,
+			);
+		}
+
+		// 0.9.0：疑似重复/冲突只提示，不自动合并。
+		function ConflictsSection({ items }) {
+			if (!Array.isArray(items) || items.length === 0) return null;
+			return h(
+				"div",
+				{ style: card },
+				h("strong", null, "疑似重复 · 需要人工合并"),
+				h(
+					"div",
+					{ style: { ...muted, marginTop: "4px" } },
+					"这些条目内容高度相似（相似度 ≥ 0.8）；工具与同步都不会自动合并，请编辑其中一条。",
+				),
+				items.map((item, index) =>
+					h(
+						"div",
+						{
+							key: `${item.target}-${index}`,
+							style: { marginTop: "10px", paddingTop: index === 0 ? "0" : "10px", borderTop: index === 0 ? "none" : "1px solid rgba(127,127,127,0.18)" },
+						},
+						h(
+							"div",
+							{ style: muted },
+							`${TARGET_LABELS[item.target] || item.target} · 相似度 ${Math.round((item.similarity || 0) * 100)}%`,
+						),
+						h("div", { style: { fontSize: "12px", marginTop: "4px", opacity: 0.85 } }, `A: ${clipText(item.a, 160)}`),
+						h("div", { style: { fontSize: "12px", marginTop: "2px", opacity: 0.85 } }, `B: ${clipText(item.b, 160)}`),
+					),
+				),
+			);
+		}
+
 		function PanelPage() {
 			const [state, setState] = react.useState(null);
 			const [error, setError] = react.useState("");
@@ -577,8 +723,8 @@ window.__ModuleLoader__.load({
 							{
 								style: {
 									...card,
-									borderColor: "rgba(217,83,79,0.6)",
-									color: "#d9534f",
+									borderColor: "rgba(179,38,30,0.6)",
+									color: "#b3261e",
 									padding: "10px 12px",
 								},
 							},
@@ -621,6 +767,8 @@ window.__ModuleLoader__.load({
 				h(SuggestionsSection, { items: state.suggestions, busy, onDecide: onSuggest }),
 				h(ReviewsSection, { items: state.reviews }),
 				h(WritesSection, { items: state.writes, busy, onWrite }),
+				h(ConflictsSection, { items: state.conflicts }),
+				h(SyncSection, { busy, onMerged: refresh }),
 			);
 		}
 
@@ -654,7 +802,7 @@ window.__ModuleLoader__.load({
 			whiteSpace: "pre-wrap",
 			wordBreak: "break-word",
 		};
-		const errorText = { color: "#d9534f" };
+		const errorText = { color: "#b3261e" };
 
 		function clipText(value, max) {
 			if (typeof value !== "string") return "";

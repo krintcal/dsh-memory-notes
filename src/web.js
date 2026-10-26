@@ -11,12 +11,15 @@
  */
 import { MemoryError } from './store.js';
 import { applyRecord, summarizePending } from './pending.js';
+import { exportBundle, mergeBundle } from './sync.js';
+import { findConflictGroups } from './conflicts.js';
 
 const ROUTES = {
   state: '/api/dsh-memory-notes/state',
   write: '/api/dsh-memory-notes/write',
   pending: '/api/dsh-memory-notes/pending',
   suggestions: '/api/dsh-memory-notes/suggestions',
+  sync: '/api/dsh-memory-notes/sync',
 };
 
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -140,9 +143,13 @@ export function createWebApi({ store, pending, reviewLog, writeLog, suggestions,
   return {
     state() {
       const targets = {};
+      const conflicts = [];
       for (const target of store?.targets ?? ['memory', 'user']) {
         try {
           targets[target] = targetView(store, target);
+          for (const pair of findConflictGroups(targets[target].entries ?? [])) {
+            conflicts.push({ target, ...pair });
+          }
         } catch {
           /* 某一轨读失败不应让整个面板报错 */
         }
@@ -150,12 +157,31 @@ export function createWebApi({ store, pending, reviewLog, writeLog, suggestions,
       return {
         ok: true,
         targets,
+        conflicts,
         pending: pendingItems(),
         suggestions: suggestionItems(),
         review: reviewView(),
         reviews: reviewItems(),
         writes: writeItems(),
       };
+    },
+
+    syncExport() {
+      try {
+        return { ok: true, bundle: exportBundle(store) };
+      } catch (err) {
+        return { ok: false, error: err?.message ?? String(err) };
+      }
+    },
+
+    syncMerge(body) {
+      const bundle = body && typeof body === 'object' && body.bundle ? body.bundle : body;
+      try {
+        const result = mergeBundle(store, bundle);
+        return { ok: true, ...result, state: this.state() };
+      } catch (err) {
+        return { ok: false, error: err?.message ?? String(err) };
+      }
     },
 
     write(body) {
@@ -321,7 +347,41 @@ function handler(api, fn, method, authorize) {
   };
 }
 
-/** 组装四条路由（形状同 webServer.register 契约：{kind:'exact', path, handler}）。 */
+/**
+ * 0.9.0：同步路由同时承载 GET（导出）与 POST（合并）。
+ * webServer 的同路径路由只能注册一次，所以这里自己按 method 分派。
+ */
+function syncRouteHandler(api, authorize) {
+  return async (req, res) => {
+    try {
+      if (typeof authorize === 'function' && authorize(req, res) === true) return;
+      if (!isLoopbackRequest(req)) {
+        writeJson(res, 403, { ok: false, error: 'forbidden: loopback requests only' });
+        return;
+      }
+      const method = String(req.method ?? '').toUpperCase();
+      if (method === 'GET') {
+        writeJson(res, 200, api.syncExport());
+        return;
+      }
+      if (method !== 'POST') {
+        writeJson(res, 405, { ok: false, error: `method ${req.method} not allowed` });
+        return;
+      }
+      const contentType = req.headers?.['content-type'];
+      if (typeof contentType !== 'string' || !contentType.trim().toLowerCase().startsWith('application/json')) {
+        writeJson(res, 415, { ok: false, error: 'content-type must be application/json' });
+        return;
+      }
+      const body = await readJsonBody(req);
+      writeJson(res, 200, api.syncMerge(body));
+    } catch (err) {
+      writeJson(res, 400, { ok: false, error: err?.message ?? String(err) });
+    }
+  };
+}
+
+/** 组装路由（形状同 webServer.register 契约：{kind:'exact', path, handler}）。 */
 export function buildRoutes(api, options = {}) {
   const { authorize } = options;
   return [
@@ -337,6 +397,7 @@ export function buildRoutes(api, options = {}) {
       path: ROUTES.suggestions,
       handler: handler(api, (a, body) => a.suggestionsDecision(body), 'POST', authorize),
     },
+    { kind: 'exact', path: ROUTES.sync, handler: syncRouteHandler(api, authorize) },
   ];
 }
 
