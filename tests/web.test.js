@@ -240,6 +240,7 @@ test('registerWebPanel 通过 ctx.effect 注册路由，dispose 时调用每个 
         return () => disposed.push(route.path);
       },
     },
+    connection: { requestRejection: () => undefined },
     effect(fn, label) {
       effectLabel = label;
       cleanup = fn();
@@ -249,7 +250,7 @@ test('registerWebPanel 通过 ctx.effect 注册路由，dispose 时调用每个 
 
   const ctx = {
     inject(services, callback) {
-      assert.deepEqual(services, ['webServer']);
+      assert.deepEqual(services, ['webServer', 'connection']);
       callback(webCtx);
     },
   };
@@ -360,4 +361,92 @@ test('layered 记忆：state 暴露全部五轨（key/project/daily）', () => {
   assert.deepEqual(state.targets.key.entries, ['key entry [branch:main]']);
   assert.deepEqual(state.targets.daily.entries, ['daily entry']);
   assert.deepEqual(state.targets.project.entries, ['project entry']);
+});
+
+/* --------------------- 0.8.0：面板路由 token 鉴权 --------------------- */
+
+function authorizedRoutes(api, rejection) {
+  return buildRoutes(api, {
+    authorize(req, res) {
+      if (rejection === undefined) return false;
+      res.statusCode = rejection;
+      res.end();
+      return true;
+    },
+  });
+}
+
+test('authorize 返回拒绝时路由被拦下，store 不变', async () => {
+  const { store, api } = fixture();
+  store.add('memory', 'keep');
+  const route = authorizedRoutes(api, 401).find((item) => item.path.endsWith('/write'));
+
+  const { res } = await callRoute(
+    route,
+    rawRequest({
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ target: 'memory', action: 'add', content: 'hacked' }),
+    }),
+  );
+  assert.equal(res.statusCode, 401);
+  assert.deepEqual(store.entries('memory'), ['keep']);
+});
+
+test('authorize 放行时路由正常返回 200', async () => {
+  const { api } = fixture();
+  const route = authorizedRoutes(api, undefined).find((item) => item.path.endsWith('/state'));
+  const { res, payload } = await callRoute(route, rawRequest({ method: 'GET' }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(payload.ok, true);
+});
+
+test('registerWebPanel 无 connection 服务时 fail-open（不阻断）', async () => {
+  const { store, pending } = fixture();
+  const registered = [];
+  const webCtx = {
+    webServer: {
+      register(route) {
+        registered.push(route);
+        return () => {};
+      },
+    },
+    effect(fn) {
+      fn();
+    },
+  };
+  const ctx = {
+    inject(_services, callback) {
+      callback(webCtx);
+    },
+  };
+  registerWebPanel(ctx, { store, pending });
+  assert.equal(registered.length, 4);
+  const stateRoute = registered.find((route) => route.path.endsWith('/state'));
+  const { res, payload } = await callRoute(stateRoute, rawRequest({ method: 'GET' }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(payload.ok, true);
+});
+
+test('pending batch 摘要带 operations 预览（每条截 120 字符）', () => {
+  const { store, pending, api } = fixture();
+  store.add('memory', 'alpha beta');
+  const long = 'x'.repeat(400);
+  pending.save({
+    target: 'memory',
+    action: 'batch',
+    operations: [
+      { action: 'patch', old_text: 'beta', content: long, matched_entry: 'alpha beta' },
+      { action: 'remove', old_text: 'alpha beta', matched_entry: 'alpha beta' },
+    ],
+  });
+  const item = api.state().pending[0];
+  assert.equal(item.action, 'batch');
+  assert.equal(item.operation_count, 2);
+  assert.equal(item.operations.length, 2);
+  assert.equal(item.operations[0].action, 'patch');
+  assert.equal(item.operations[0].old_text, 'beta');
+  assert.ok(item.operations[0].content.length <= 120);
+  assert.match(item.operations[0].content, /…$/);
+  assert.equal(item.operations[1].action, 'remove');
 });

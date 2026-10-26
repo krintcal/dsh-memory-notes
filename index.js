@@ -133,6 +133,7 @@ export function apply(ctx, config = {}) {
     ...tracks.limits,
     files: tracks.files,
     targets: tracks.targets,
+    threatScan: config.threatScan !== false,
     onWrite: (record) => writeLog.append(record),
   });
   if (cwd) void primeBranch(cwd);

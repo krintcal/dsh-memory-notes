@@ -65,6 +65,7 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
 | `curatorKeepSnapshots` | `5` | 保留几份快照 |
 | `curatorPaused` | `false` | 暂停整理 |
 | `curatorConsolidate` | `'off'` | `suggest` 时在出现 stale 技能后起 fork，把记忆合并建议以 `stage` 提交 |
+| `threatScan` | `true` | 写入口的提示注入粗筛；关掉后不再拒绝疑似注入的内容 |
 | `strictReadBeforeWrite` | `true` | 技能写入前必须读过、且读后文件未变 |
 | `pendingDir` | `<dir>/pending` | 后台 review 的破坏性写入排队目录 |
 | `webPanelEnabled` | `true` | 关掉左侧栏面板与 `/api/dsh-memory-notes/*` 路由 |
@@ -189,6 +190,27 @@ per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默
 - **curator 建议制** `curatorConsolidate: 'suggest'`：curator 发现有 stale 技能后起一个 fork，
   要求它把「可合并/可删除」的建议以 `stage` 动作提交，而不是直接改写技能库；
   默认 `'off'`，与 Hermes 的保守默认一致。
+
+## 0.8.0：面板鉴权、批量预览、安全件与 UI 打磨
+
+- **面板路由接 GUI token 鉴权**：`registerWebPanel` 改为 `ctx.inject(['webServer','connection'])`，
+  每条 `/api/dsh-memory-notes/*` 路由在写响应前先调 `connection.requestRejection(req)`
+  （DSH 的 `browserAuth`：launch token / 签名 cookie / Host+Origin 校验）。返回 `401`（未登录）
+  或 `403`（跨站 / DNS rebinding）时直接回写状态码、不碰数据；宿主没有 `connection` 服务时
+  fail-open 并打一条 warn，老宿主仍可用。
+- **pending 批量可预览**：面板「待确认」卡片不再只显示「× N」，展开后逐条列出 `action`、
+  `old_text`、`content`（各截 120 字符，最多 10 条，超出显示「还有 N 项」）。
+- **curator 建议制有回归测试**：`consolidate:'suggest'` 在有 stale 技能时确实调用
+  `subagents.startActivation({ provider:'fork', label:'memory-curator', delivery:'caller' })`，
+  完成后写 `channel:'curator'` 的 review-log；`'off'` 或缺少 `subagents` / `agents` 服务时安静跳过。
+- **安全件（借 evolve）**：
+  - `threatScan`（默认 `true`）：写入口先做提示注入粗筛（中文「无视 / 忽略…指令 / 规则」，
+    英文 `ignore all previous instructions` 等），命中拒绝写入；`threatScan: false` 可关。
+  - `assertCanonical`：原子写前校验 `serialize(parse(text)) === text`，内部产生非规范内容时拒绝落盘。
+  - 锁文件带 `owner.json`（`{ pid, at }`）：`isStaleLock` 除超时外，pid 已死
+    （`process.kill(pid,0)` → `ESRCH`）也立即视为 stale，避免进程崩溃留下的锁卡住写入。
+- **面板 UI 打磨**：错误色改 `#b3261e`；删除改两段式确认（3 秒未确认自动还原，不再用
+  `window.confirm`）；刷新按钮忙时显示「刷新中…」；批量删除按钮用 `dangerBtn` 样式。
 
 ## 0.7.0：分层记忆 / 回合内自审 / 快照实时化
 
@@ -327,4 +349,7 @@ pending 批准按 pin 重放、stale 拒绝并保留记录、缺 pin 的旧记�
 `store` / `curator` 各补一组：review 提示三档、审批六种返回、面板区块与撤销文案、近似重复只告警不拦截、
 curator 建议制与降级。0.7.0 新增 `tests/tracks.test.js`、`tests/review-state.test.js`、
 `tests/suggestions.test.js`、`tests/review-tool.test.js`、`tests/snapshot.test.js`，并覆盖 web 的建议采纳/丢弃与客户端的建议区块。
-当前全量 **141 pass / 0 fail**。
+0.8.0 新增 `tests/web.test.js` 的授权拦截用例（401 拒绝 / 放行 / 无 connection fail-open / 批量预览摘要）、
+`tests/store.test.js` 的安全件用例（4 类注入文案、`threatScan:false`、batch、canonical、死锁 pid、owner.json）、
+`tests/curator.test.js` 的建议制 fork 用例。
+当前全量 **155 pass / 0 fail**。

@@ -98,14 +98,29 @@ export function applyRecord(store, record) {
   throw new MemoryError(`pending record has unknown action '${action}'`, { success: false });
 }
 
+/** 展示用截断：批量预览只给前 10 条、每条 120 字符。 */
+function clip(value, max) {
+  if (typeof value !== 'string') return undefined;
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+}
+
 /** 待确认记录的展示摘要（不含 pin 数据，给工具与面板共用）。 */
 export function summarizePending(record) {
+  const isBatch = record.action === 'batch';
+  const operations = isBatch
+    ? (Array.isArray(record.operations) ? record.operations : []).slice(0, 10).map((op) => ({
+        action: op?.action,
+        ...(clip(op?.old_text, 120) === undefined ? {} : { old_text: clip(op?.old_text, 120) }),
+        ...(clip(op?.content, 120) === undefined ? {} : { content: clip(op?.content, 120) }),
+      }))
+    : undefined;
   return {
     id: record.id,
     created_at: record.created_at,
     target: record.target,
     action: record.action ?? record.op,
-    ...(record.action === 'batch' ? { operation_count: record.operations?.length ?? 0 } : {}),
+    ...(isBatch ? { operation_count: record.operations?.length ?? 0 } : {}),
+    ...(operations === undefined ? {} : { operations }),
     ...(record.old_text === undefined ? {} : { old_text: record.old_text }),
     ...(record.content === undefined ? {} : { content: record.content }),
   };

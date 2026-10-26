@@ -244,3 +244,74 @@ test("suggest 但拿不到 subagents/agents 时只降级，不抛错", () => {
   });
   assert.doesNotThrow(() => curator.run({ now, session: { id: "session-curator" } }));
 });
+
+/* --------------- 0.8.0：consolidate 'suggest' 真实触发路径 --------------- */
+
+function consolidationFixture(config = {}) {
+  const { library, stateDir, root } = makeWorkspace();
+  const now = Date.parse('2026-10-24T12:00:00Z');
+  library.create({ name: 'stale-skill', description: 'demo', body: '## steps\n1. do it' });
+  ageSkill(library, 'stale-skill', 20, now);
+
+  const calls = [];
+  const reviewLog = createReviewLog(path.join(stateDir));
+  let childCounter = 0;
+  const ctx = {
+    get(name) {
+      if (name === 'subagents') {
+        return {
+          startActivation(options) {
+            calls.push(options);
+            childCounter += 1;
+            return Promise.resolve({ childId: `curator-child-${childCounter}`, result: Promise.resolve() });
+          },
+        };
+      }
+      if (name === 'agents') {
+        return { get: (id) => ({ id, kind: 'fake-agent' }) };
+      }
+      return undefined;
+    },
+  };
+  const curator = createCurator({
+    library,
+    stateDir,
+    ctx,
+    reviewLog,
+    config: { intervalHours: 168, consolidate: 'suggest', ...config },
+  });
+  return { curator, calls, reviewLog, stateDir, root, now };
+}
+
+test("consolidate:'suggest' 且存在 stale 技能时起一个 memory-curator fork", async () => {
+  const { curator, calls, reviewLog, now } = consolidationFixture();
+  curator.run({ session: { id: 'session-1' }, now });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].provider, 'fork');
+  assert.equal(calls[0].label, 'memory-curator');
+  assert.equal(calls[0].delivery, 'caller');
+  assert.match(calls[0].request.prompt[0].text, /stage/);
+
+  // 等 activation 的 promise 链跑完，再断言 review-log
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const entry = reviewLog.recent(5).find((item) => item.channel === 'curator');
+  assert.ok(entry, 'review-log 里应有 curator 记录');
+  assert.equal(entry.child_id, 'curator-child-1');
+  assert.equal(entry.session_id, 'session-1');
+});
+
+test("consolidate:'off' 时不启动 fork", () => {
+  const { curator, calls, now } = consolidationFixture({ consolidate: 'off' });
+  curator.run({ session: { id: 'session-1' }, now });
+  assert.equal(calls.length, 0);
+});
+
+test('缺 subagents/agents 服务时跳过并保持可运行', () => {
+  const { library, stateDir } = makeWorkspace();
+  const now = Date.parse('2026-10-24T12:00:00Z');
+  library.create({ name: 'stale-skill', description: 'demo', body: 'x' });
+  ageSkill(library, 'stale-skill', 20, now);
+  const curator = createCurator({ library, stateDir, config: { consolidate: 'suggest' } });
+  const summary = curator.run({ session: { id: 'session-1' }, now });
+  assert.deepEqual(summary.stale.map((s) => s.name), ['stale-skill']);
+});

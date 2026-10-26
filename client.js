@@ -67,6 +67,7 @@ window.__ModuleLoader__.load({
 			border: "1px solid rgba(127,127,127,0.7)",
 			background: "rgba(127,127,127,0.16)",
 		};
+		const dangerBtn = { ...smallBtn, border: "1px solid rgba(179,38,30,0.7)", color: "#b3261e" };
 		const textarea = {
 			width: "100%",
 			boxSizing: "border-box",
@@ -93,7 +94,7 @@ window.__ModuleLoader__.load({
 			height: "100%",
 			width: `${Math.max(0, Math.min(100, percent))}%`,
 			borderRadius: "999px",
-			background: percent >= 90 ? "#d9534f" : percent >= 75 ? "#d9a441" : "#4a9d6a",
+			background: percent >= 90 ? "#b3261e" : percent >= 75 ? "#d9a441" : "#4a9d6a",
 			transition: "width 160ms ease",
 		});
 
@@ -108,6 +109,12 @@ window.__ModuleLoader__.load({
 		function EntryCard({ target, entry, index, busy, onSave, onRemove }) {
 			const [text, setText] = react.useState(entry);
 			react.useEffect(() => setText(entry), [entry]);
+			const [confirming, setConfirming] = react.useState(false);
+			react.useEffect(() => {
+				if (!confirming) return undefined;
+				const timer = setTimeout(() => setConfirming(false), 3000);
+				return () => clearTimeout(timer);
+			}, [confirming]);
 			const dirty = text !== entry;
 			return h(
 				"div",
@@ -126,7 +133,22 @@ window.__ModuleLoader__.load({
 									"保存",
 								)
 							: null,
-						h("button", { style: smallBtn, disabled: busy, onClick: () => onRemove(entry) }, "删除"),
+						h(
+							"button",
+							{
+								style: confirming ? dangerBtn : smallBtn,
+								disabled: busy,
+								onClick: () => {
+									if (!confirming) {
+										setConfirming(true);
+										return;
+									}
+									setConfirming(false);
+									onRemove(entry);
+								},
+							},
+							confirming ? "确认删除" : "删除",
+						),
 					),
 				),
 				h("textarea", {
@@ -190,12 +212,7 @@ window.__ModuleLoader__.load({
 								index,
 								busy,
 								onSave: (oldText, content) => onWrite({ target, action: "patch", old_text: oldText, content }),
-								onRemove: (oldText) => {
-									if (typeof window !== "undefined" && typeof window.confirm === "function") {
-										if (!window.confirm("删除这条记忆？")) return Promise.resolve(false);
-									}
-									return onWrite({ target, action: "remove", old_text: oldText });
-								},
+								onRemove: (oldText) => onWrite({ target, action: "remove", old_text: oldText }),
 							}),
 						),
 				h(AddEntry, {
@@ -263,7 +280,23 @@ window.__ModuleLoader__.load({
 									`new: ${item.content.length > 200 ? `${item.content.slice(0, 200)}…` : item.content}`,
 								)
 							: null,
-						item.operation_count !== undefined ? h("div", { style: muted }, `批量操作 × ${item.operation_count}`) : null,
+						item.operation_count !== undefined
+							? h(
+									"div",
+									{ style: { ...muted, marginTop: "4px", maxHeight: "160px", overflow: "auto" } },
+									h("div", null, `批量操作 × ${item.operation_count}`),
+									(Array.isArray(item.operations) ? item.operations : []).map((op, opIndex) =>
+										h(
+											"div",
+											{ key: `${item.id}:op:${opIndex}`, style: { paddingLeft: "10px", whiteSpace: "pre-wrap", wordBreak: "break-word" } },
+											`· ${op.action}${op.old_text ? ` "${op.old_text}"` : ""}${op.content ? ` → "${op.content}"` : ""}`,
+										),
+									),
+									Array.isArray(item.operations) && item.operation_count > item.operations.length
+										? h("div", null, `还有 ${item.operation_count - item.operations.length} 项`)
+										: null,
+								)
+							: null,
 					),
 				),
 			);
@@ -529,7 +562,7 @@ window.__ModuleLoader__.load({
 									void refresh();
 								},
 							},
-							"刷新",
+							busy ? "刷新中…" : "刷新",
 						),
 					),
 				),

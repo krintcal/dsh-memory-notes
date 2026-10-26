@@ -188,6 +188,29 @@ function validateContent(value, target) {
   return normalized;
 }
 
+/**
+ * 提示注入扫描（0.8.0，思路借鉴 dsh-memory-evolve 的 scanThreat）：记忆会原样
+ * 进入后续会话的提示词，命中「无视之前指令」这类措辞的写入直接拒绝。
+ */
+const THREAT_PATTERNS = [
+  /无视[^\n]{0,24}?(指令|指示|提示|规则|限制|约束)/,
+  /忽略[^\n]{0,24}?(指令|指示|提示|规则|限制|约束)/,
+  /ignore\s+(?:all|any)\s+(?:of\s+)?(?:(?:the|your|previous|prior|above|earlier)\s+){0,4}(instructions?|rules?|prompts?|directions?)/i,
+  /disregard\s+(?:all|any|the)\s+(?:(?:previous|prior|above|earlier)\s+)?(instructions?|rules?|prompts?)/i,
+];
+
+function assertSafeContent(value, target) {
+  const normalized = text(value);
+  for (const pattern of THREAT_PATTERNS) {
+    if (pattern.test(normalized)) {
+      throw new MemoryError('Content looks like a prompt injection attempt and was rejected.', {
+        success: false,
+        target,
+      });
+    }
+  }
+}
+
 export class MemoryStore {
   constructor({
     dir,
@@ -200,6 +223,7 @@ export class MemoryStore {
     targets,
     headers,
     onWrite,
+    threatScan = true,
   } = {}) {
     if (!dir) throw new Error('MemoryStore requires a dir');
     this.dir = dir;
@@ -219,6 +243,24 @@ export class MemoryStore {
     this.onWrite = typeof onWrite === 'function' ? onWrite : undefined;
     // 调用方（工具层 / 面板）写前设置，store 读取后清空；batch 的所有 op 共用同一来源。
     this.lastSource = undefined;
+    // 0.8.0：写入内容的提示注入扫描（可关闭，测试或特殊场景用）。
+    this.threatScan = threatScan !== false;
+  }
+
+  /** 所有写入口的统一内容校验：§ 分隔符 + 提示注入（可选）。 */
+  checkContent(value, target) {
+    const normalized = validateContent(value, target);
+    if (this.threatScan) assertSafeContent(normalized, target);
+    return normalized;
+  }
+
+  /** 防御性：序列化后的文本必须能无损 parse 回来（evolve 的 isCanonical 思路）。 */
+  assertCanonical(serialized) {
+    if (this.serialize(this.parse(serialized)) !== serialized) {
+      throw new MemoryError('Internal write produced non-canonical entries; nothing was written.', {
+        success: false,
+      });
+    }
   }
 
   takeSource() {
@@ -341,6 +383,12 @@ export class MemoryStore {
     for (;;) {
       try {
         fs.mkdirSync(lock);
+        // 0.8.0：把持锁 pid 写进锁目录，别的进程可据此判断持有者是否还活着。
+        try {
+          fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, at: Date.now() }));
+        } catch {
+          /* 诊断信息写不进去不影响锁本身 */
+        }
         break;
       } catch (err) {
         if (err.code !== 'EEXIST') throw err;
@@ -363,7 +411,21 @@ export class MemoryStore {
     try {
       const stat = fs.statSync(lock);
       const age = Date.now() - Math.max(stat.mtimeMs, stat.ctimeMs);
-      return age > STALE_LOCK_MS;
+      if (age > STALE_LOCK_MS) return true;
+      try {
+        const owner = JSON.parse(fs.readFileSync(path.join(lock, 'owner.json'), 'utf8'));
+        const pid = Number(owner?.pid);
+        if (Number.isInteger(pid) && pid > 0) {
+          try {
+            process.kill(pid, 0);
+          } catch (err) {
+            if (err?.code === 'ESRCH') return true; // 持锁进程已经死了
+          }
+        }
+      } catch {
+        /* 旧锁没有 owner.json：只按年龄判断 */
+      }
+      return false;
     } catch {
       // 锁刚好被别人放掉：当作可重试
       return true;
@@ -396,6 +458,7 @@ export class MemoryStore {
       const outcome = mutate([...onDisk]);
       const next = Array.isArray(outcome) ? outcome : outcome.entries;
       const body = this.serialize(next);
+      this.assertCanonical(body);
       const fileDir = path.dirname(file);
       fs.mkdirSync(fileDir, { recursive: true });
       const tmp = path.join(fileDir, `.mem_${path.basename(file)}.tmp`);
@@ -485,7 +548,7 @@ export class MemoryStore {
     const source = this.takeSource();
     const value = text(content).trim();
     if (!value) throw new MemoryError('Content cannot be empty.', { success: false, target });
-    validateContent(value, target);
+    this.checkContent(value, target);
     const current = this.entries(target);
     if (current.includes(value)) return this.respond(target, 'Entry already exists (no duplicate added).');
     this.write(target, (entries) => {
@@ -523,7 +586,7 @@ export class MemoryStore {
     if (!value.trim()) {
       throw new MemoryError(`new_text cannot be empty. ${PATCH_DROP_HINT}`, { success: false, target });
     }
-    validateContent(value, target);
+    this.checkContent(value, target);
     let extra = {};
     this.write(target, (entries) => {
       const idx = this.locateIn(entries, needle, 'patch', matchedEntry);
@@ -573,7 +636,7 @@ export class MemoryStore {
     }
     const value = text(newContent).trim();
     if (!value) throw new MemoryError("new_content cannot be empty. Use 'remove' to delete entries.", { success: false, target });
-    validateContent(value, target);
+    this.checkContent(value, target);
     let previous;
     this.write(target, (entries) => {
       const idx = this.locateIn(entries, needle, 'replace', matchedEntry);
@@ -643,7 +706,7 @@ export class MemoryStore {
       }
       if (act === 'add') {
         if (!content) throw this.batchFailure(target, `${pos}: content is required.${note}`);
-        validateContent(content, target);
+        this.checkContent(content, target);
         if (!working.includes(content)) {
           working.push(content);
           changes.push({ action: 'add', target, before: null, after: content, content });
@@ -662,7 +725,7 @@ export class MemoryStore {
             `(or use action='remove' to delete).${note}`,
         );
       }
-      if (act === 'replace') validateContent(content, target);
+      if (act === 'replace') this.checkContent(content, target);
       if (act === 'patch' && !content.trim()) {
         throw this.batchFailure(
           target,
@@ -695,7 +758,7 @@ export class MemoryStore {
         matched.push(previous);
         continue;
       }
-      validateContent(content, target);
+      this.checkContent(content, target);
       const outcome = patchEntry(previous, oldText, content);
       if (outcome.error) throw this.batchFailure(target, `${pos}: ${outcome.error}${note}`);
       working.splice(idx, 1, outcome.patched);

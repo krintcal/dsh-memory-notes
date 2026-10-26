@@ -293,9 +293,11 @@ async function readJsonBody(req) {
   return JSON.parse(raw);
 }
 
-function handler(api, fn, method) {
+function handler(api, fn, method, authorize) {
   return async (req, res) => {
     try {
+      // 先问宿主的 connection 服务：Host/Origin fence + GUI cookie 鉴权（0.8.0）。
+      if (typeof authorize === 'function' && authorize(req, res) === true) return;
       if (!isLoopbackRequest(req)) {
         writeJson(res, 403, { ok: false, error: 'forbidden: loopback requests only' });
         return;
@@ -319,16 +321,21 @@ function handler(api, fn, method) {
   };
 }
 
-/** 组装三条路由（形状同 webServer.register 契约：{kind:'exact', path, handler}）。 */
-export function buildRoutes(api) {
+/** 组装四条路由（形状同 webServer.register 契约：{kind:'exact', path, handler}）。 */
+export function buildRoutes(api, options = {}) {
+  const { authorize } = options;
   return [
-    { kind: 'exact', path: ROUTES.state, handler: handler(api, (a) => a.state(), 'GET') },
-    { kind: 'exact', path: ROUTES.write, handler: handler(api, (a, body) => a.write(body), 'POST') },
-    { kind: 'exact', path: ROUTES.pending, handler: handler(api, (a, body) => a.pendingDecision(body), 'POST') },
+    { kind: 'exact', path: ROUTES.state, handler: handler(api, (a) => a.state(), 'GET', authorize) },
+    { kind: 'exact', path: ROUTES.write, handler: handler(api, (a, body) => a.write(body), 'POST', authorize) },
+    {
+      kind: 'exact',
+      path: ROUTES.pending,
+      handler: handler(api, (a, body) => a.pendingDecision(body), 'POST', authorize),
+    },
     {
       kind: 'exact',
       path: ROUTES.suggestions,
-      handler: handler(api, (a, body) => a.suggestionsDecision(body), 'POST'),
+      handler: handler(api, (a, body) => a.suggestionsDecision(body), 'POST', authorize),
     },
   ];
 }
@@ -336,17 +343,34 @@ export function buildRoutes(api) {
 /**
  * 把路由挂到 web 服务上。webServer 是可选服务（CLI 宿主没有），所以走
  * `ctx.inject` 等它出现；注册失败只记日志，绝不影响工具与提示词。
+ *
+ * 0.8.0 起把 `connection` 也 inject 起来：每个请求先过 `requestRejection`
+ * （Host/Origin fence + 浏览器 cookie 鉴权），拿不到 connection 服务的宿主
+ * fail-open（纯 CLI 宿主本来就没有 HTTP 入口）。
  */
 export function registerWebPanel(ctx, { store, pending, reviewLog, writeLog, suggestions, review }) {
   if (typeof ctx?.inject !== 'function') return;
   const api = createWebApi({ store, pending, reviewLog, writeLog, suggestions, review });
-  ctx.inject(['webServer'], (webCtx) => {
+  ctx.inject(['webServer', 'connection'], (webCtx) => {
     try {
       const server = webCtx.webServer ?? webCtx.get?.('webServer');
       if (!server || typeof server.register !== 'function') return;
+      const connection = webCtx.connection ?? webCtx.get?.('connection');
+      if (typeof connection?.requestRejection !== 'function') {
+        console.warn('[memory-notes] connection service unavailable: panel routes run without GUI token auth');
+      }
+      const authorize = (req, res) => {
+        if (typeof connection?.requestRejection !== 'function') return false;
+        const rejection = connection.requestRejection(req);
+        if (rejection === undefined) return false;
+        res.statusCode = rejection;
+        res.setHeader('cache-control', 'no-store');
+        res.end();
+        return true;
+      };
       const registerRoutes = () => {
         const disposers = [];
-        for (const route of buildRoutes(api)) {
+        for (const route of buildRoutes(api, { authorize })) {
           const dispose = server.register(route);
           if (typeof dispose === 'function') disposers.push(dispose);
         }
