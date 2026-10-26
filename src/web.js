@@ -16,6 +16,7 @@ const ROUTES = {
   state: '/api/dsh-memory-notes/state',
   write: '/api/dsh-memory-notes/write',
   pending: '/api/dsh-memory-notes/pending',
+  suggestions: '/api/dsh-memory-notes/suggestions',
 };
 
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -82,12 +83,42 @@ function targetView(store, target) {
   };
 }
 
-export function createWebApi({ store, pending, reviewLog, writeLog }) {
+export function createWebApi({ store, pending, reviewLog, writeLog, suggestions, review } = {}) {
   const pendingEnabled = pending?.enabled === true;
+  const suggestionsEnabled = typeof suggestions?.take === 'function';
 
   function pendingItems() {
     if (!pendingEnabled) return [];
     return pending.list().map(summarizePending);
+  }
+
+  function suggestionItems() {
+    if (!suggestionsEnabled) return [];
+    try {
+      return (suggestions.list() ?? []).slice(-20).map(({ id, created_at, target, text }) => ({
+        id,
+        created_at,
+        target,
+        text,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  function reviewView() {
+    try {
+      const value = typeof review === 'function' ? review() : review;
+      if (!value || typeof value !== 'object') return { due: false, turns_since: 0, interval: 0, mode: 'off' };
+      return {
+        due: value.due === true,
+        turns_since: Number(value.turns_since) || 0,
+        interval: Number(value.interval) || 0,
+        mode: value.mode === 'auto' ? 'auto' : value.mode === 'off' ? 'off' : 'suggest',
+      };
+    } catch {
+      return { due: false, turns_since: 0, interval: 0, mode: 'off' };
+    }
   }
 
   function reviewItems() {
@@ -108,13 +139,20 @@ export function createWebApi({ store, pending, reviewLog, writeLog }) {
 
   return {
     state() {
+      const targets = {};
+      for (const target of store?.targets ?? ['memory', 'user']) {
+        try {
+          targets[target] = targetView(store, target);
+        } catch {
+          /* 某一轨读失败不应让整个面板报错 */
+        }
+      }
       return {
         ok: true,
-        targets: {
-          memory: targetView(store, 'memory'),
-          user: targetView(store, 'user'),
-        },
+        targets,
         pending: pendingItems(),
+        suggestions: suggestionItems(),
+        review: reviewView(),
         reviews: reviewItems(),
         writes: writeItems(),
       };
@@ -189,6 +227,44 @@ export function createWebApi({ store, pending, reviewLog, writeLog }) {
         return { ok: false, error: err?.message ?? String(err) };
       }
     },
+
+    suggestionsDecision(body) {
+      const input = body && typeof body === 'object' ? body : {};
+      if (!suggestionsEnabled) return { ok: false, error: 'suggestion queue is unavailable' };
+      const id = typeof input.id === 'string' ? input.id : '';
+      const record = suggestions.take(id);
+      if (!record) return { ok: false, error: `no suggestion '${id}'` };
+      if (input.decision === 'discard') {
+        const dropped = suggestions.drop(id);
+        return {
+          ok: true,
+          discarded_suggestion: id,
+          ...(dropped ? {} : { drop_failed: true }),
+          state: this.state(),
+        };
+      }
+      if (input.decision !== 'accept') {
+        return { ok: false, error: "decision must be 'accept' or 'discard'" };
+      }
+      try {
+        store.lastSource = 'panel';
+        const result = store.add(record.target, record.text);
+        const dropped = suggestions.drop(id);
+        return {
+          ok: true,
+          accepted_suggestion: id,
+          result,
+          ...(dropped ? {} : { drop_failed: true }),
+          state: this.state(),
+        };
+      } catch (err) {
+        // 含 § / 超限等失败时保留建议，用户还能在面板里看过再决定。
+        if (err instanceof MemoryError) {
+          return { ok: false, error: err.message, ...err.detail, state: this.state() };
+        }
+        return { ok: false, error: err?.message ?? String(err), state: this.state() };
+      }
+    },
   };
 }
 
@@ -249,6 +325,11 @@ export function buildRoutes(api) {
     { kind: 'exact', path: ROUTES.state, handler: handler(api, (a) => a.state(), 'GET') },
     { kind: 'exact', path: ROUTES.write, handler: handler(api, (a, body) => a.write(body), 'POST') },
     { kind: 'exact', path: ROUTES.pending, handler: handler(api, (a, body) => a.pendingDecision(body), 'POST') },
+    {
+      kind: 'exact',
+      path: ROUTES.suggestions,
+      handler: handler(api, (a, body) => a.suggestionsDecision(body), 'POST'),
+    },
   ];
 }
 
@@ -256,9 +337,9 @@ export function buildRoutes(api) {
  * 把路由挂到 web 服务上。webServer 是可选服务（CLI 宿主没有），所以走
  * `ctx.inject` 等它出现；注册失败只记日志，绝不影响工具与提示词。
  */
-export function registerWebPanel(ctx, { store, pending, reviewLog, writeLog }) {
+export function registerWebPanel(ctx, { store, pending, reviewLog, writeLog, suggestions, review }) {
   if (typeof ctx?.inject !== 'function') return;
-  const api = createWebApi({ store, pending, reviewLog, writeLog });
+  const api = createWebApi({ store, pending, reviewLog, writeLog, suggestions, review });
   ctx.inject(['webServer'], (webCtx) => {
     try {
       const server = webCtx.webServer ?? webCtx.get?.('webServer');

@@ -4,17 +4,19 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createNudgeScheduler } from '../src/nudge.js';
+import { createNudgeScheduler, reviewPrompt } from '../src/nudge.js';
 import { createReviewLog } from '../src/review-log.js';
+import { loadReviewState } from '../src/review-state.js';
+import { clearReviewSession, markReviewSession } from '../src/review-registry.js';
+import { MemoryStore } from '../src/store.js';
 
-/** 最小假宿主：只实现调度器用到的 ctx.on / ctx.get（services）。 */
-function makeCtx({ agent, startActivation } = {}) {
+function tempDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-memory-nudge-'));
+}
+
+function makeCtx({ agent } = {}) {
   const listeners = new Map();
-  const services = {
-    agents: { get: (id) => (agent && agent.id === id ? agent : undefined) },
-  };
-  if (startActivation) services.subagents = { startActivation };
-  const ctx = {
+  return {
     on(name, fn) {
       const list = listeners.get(name) ?? [];
       list.push(fn);
@@ -26,324 +28,149 @@ function makeCtx({ agent, startActivation } = {}) {
       };
     },
     get(name) {
-      return services[name];
+      if (name === 'agents') return { get: (id) => (agent && agent.id === id ? agent : undefined) };
+      return undefined;
     },
-    agents: services.agents,
     emit(session, event) {
       for (const fn of listeners.get('session/event') ?? []) fn(session, event);
     },
   };
-  return ctx;
-}
-
-function tempDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-memory-nudge-'));
 }
 
 const turnEnd = (session) => [session, { type: 'turn/end' }];
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-function schedulerFor(dir, ctx, overrides = {}) {
-  const { store, ...rest } = overrides;
-  return createNudgeScheduler({
+function setup({ interval = 10, noticeMode = 'on' } = {}) {
+  const dir = tempDir();
+  const injected = [];
+  const session = { id: 'session-a' };
+  const agent = { id: session.id, inject: (message) => injected.push(message) };
+  const ctx = makeCtx({ agent });
+  const store = new MemoryStore({ dir });
+  const reviewLog = createReviewLog(dir);
+  const scheduler = createNudgeScheduler({
     ctx,
-    store: store ?? { dir },
-    config: { dir, nudgeInterval: 10, provider: 'fork', ...rest },
+    store,
+    config: { dir, nudgeInterval: interval, noticeMode, reviewLog },
   });
+  return { dir, ctx, store, reviewLog, scheduler, session, injected, agent };
 }
 
-test('第 9 个回合不触发，第 10 个回合触发且只触发一次', async () => {
-  const dir = tempDir();
-  const calls = [];
-  const session = { id: 'session-a' };
-  const ctx = makeCtx({
-    agent: { id: 'session-a' },
-    startActivation: (spec) => {
-      calls.push(spec);
-      return Promise.resolve({ childId: 'child-1', result: new Promise(() => {}) });
-    },
-  });
-  const scheduler = schedulerFor(dir, ctx);
+test('reviewPrompt 保留记忆与技能两套提示词', () => {
+  const prompt = reviewPrompt({ memory: true, skills: true, skillsEnabled: true });
+  assert.match(prompt, /memory tool/);
+  assert.match(prompt, /\*\*Skills\*\*/);
+  assert.match(prompt, /Be ACTIVE/);
+  assert.match(reviewPrompt({ memory: true, skills: false }), /One fact goes to ONE store/);
+});
 
+test('第 9 个回合不到点，第 10 个到点且不启动任何子代理', async () => {
+  const { ctx, session, scheduler } = setup();
   for (let i = 0; i < 9; i += 1) ctx.emit(...turnEnd(session));
   await tick();
-  assert.equal(calls.length, 0, '9 轮不该触发');
+  assert.equal(scheduler.status().due, false);
+  assert.equal(scheduler.status().turns_since, 9);
 
   ctx.emit(...turnEnd(session));
   await tick();
-  assert.equal(calls.length, 1, '第 10 轮应触发一次');
-  assert.equal(calls[0].provider, 'fork');
-  assert.equal(calls[0].delivery, 'caller');
-  assert.equal(calls[0].request.parent.id, 'session-a');
-  assert.match(calls[0].request.prompt[0].text, /memory tool/);
-  assert.match(calls[0].request.prompt[0].text, /\*\*Skills\*\*/);
+  assert.equal(scheduler.status().due, true);
+  assert.equal(scheduler.status().turns_since, 10);
   scheduler.dispose();
 });
 
-test('触发后计数清零，再数满 10 轮才再次触发', async () => {
-  const dir = tempDir();
-  const calls = [];
-  const session = { id: 'session-b' };
-  const ctx = makeCtx({
-    agent: { id: 'session-b' },
-    startActivation: (spec) => {
-      calls.push(spec);
-      return Promise.resolve({ childId: `child-${calls.length}`, result: new Promise(() => {}) });
-    },
-  });
-  const scheduler = schedulerFor(dir, ctx);
+test('到点后捕获窗口前快照；finishReview 只结算窗口内的变化', async () => {
+  const { ctx, session, scheduler, store, reviewLog, injected, dir } = setup({ interval: 2 });
+  ctx.emit(...turnEnd(session));
+  ctx.emit(...turnEnd(session));
+  await tick();
+  assert.equal(scheduler.status().due, true);
 
-  for (let i = 0; i < 20; i += 1) {
-    ctx.emit(...turnEnd(session));
-    await tick();
+  store.add('memory', 'fact learned during review');
+  const result = scheduler.finishReview(session.id);
+  await tick();
+
+  assert.match(result.summary, /MEMORY \+1/);
+  assert.equal(reviewLog.count(), 1);
+  assert.deepEqual(reviewLog.recent(1)[0].memory.added, ['fact learned during review']);
+  assert.equal(loadReviewState(dir).turns_since_review, 0);
+  assert.equal(scheduler.status().due, false);
+  assert.equal(injected.length, 1);
+  assert.match(injected[0].content[0].text, /记忆已更新/);
+  scheduler.dispose();
+});
+
+test('同一个 due 窗口只捕获一次 before：多次 turn/end 不刷新基线', async () => {
+  const { ctx, session, scheduler, store, reviewLog } = setup({ interval: 2 });
+  ctx.emit(...turnEnd(session));
+  ctx.emit(...turnEnd(session));
+  store.add('memory', 'written before more turns');
+  // 到点后继续来回合：基线仍是第一次 due 时（空库）
+  ctx.emit(...turnEnd(session));
+  ctx.emit(...turnEnd(session));
+  scheduler.finishReview(session.id);
+  assert.deepEqual(reviewLog.recent(1)[0].memory.added, ['written before more turns']);
+  scheduler.dispose();
+});
+
+test('review 子会话自己的 turn/end 不计数', async () => {
+  const { ctx, scheduler } = setup({ interval: 2 });
+  const child = { id: 'review-child' };
+  markReviewSession(child.id);
+  try {
+    for (let i = 0; i < 10; i += 1) ctx.emit(...turnEnd(child));
+    assert.equal(scheduler.status().turns_since, 0);
+  } finally {
+    clearReviewSession(child.id);
   }
-  assert.equal(calls.length, 2, '20 轮应触发 2 次');
   scheduler.dispose();
 });
 
-test('review 子会话自己的 turn/end 不计数、不触发', async () => {
+test('计数持久化：新实例接着上一实例的进度', () => {
   const dir = tempDir();
-  const calls = [];
-  const session = { id: 'session-c' };
-  const ctx = makeCtx({
-    agent: { id: 'session-c' },
-    startActivation: () => {
-      calls.push(1);
-      return Promise.resolve({ childId: 'child-c', result: new Promise(() => {}) });
-    },
+  const session = { id: 'session-persist' };
+  const ctx1 = makeCtx();
+  const scheduler1 = createNudgeScheduler({
+    ctx: ctx1,
+    store: new MemoryStore({ dir }),
+    config: { dir, nudgeInterval: 10 },
   });
-  const scheduler = schedulerFor(dir, ctx);
-
-  for (let i = 0; i < 10; i += 1) ctx.emit(...turnEnd(session));
-  await tick();
-  assert.equal(calls.length, 1);
-
-  // 子会话连来 30 个 turn/end，一次都不该再触发
-  for (let i = 0; i < 30; i += 1) ctx.emit(...turnEnd({ id: 'child-c' }));
-  await tick();
-  assert.equal(calls.length, 1, '子会话不得触发 review');
-  scheduler.dispose();
-});
-
-test('取不到 parent agent 时不触发，计数保留到下一轮', async () => {
-  const dir = tempDir();
-  const calls = [];
-  const session = { id: 'session-d' };
-  let agent = undefined;
-  const ctx = makeCtx({
-    agent: undefined,
-    startActivation: () => {
-      calls.push(1);
-      return Promise.resolve({ childId: 'child-d', result: new Promise(() => {}) });
-    },
-  });
-  ctx.agents.get = (id) => (agent && agent.id === id ? agent : undefined);
-  const scheduler = schedulerFor(dir, ctx);
-
-  for (let i = 0; i < 10; i += 1) ctx.emit(...turnEnd(session));
-  await tick();
-  assert.equal(calls.length, 0, '没有 parent 不能起 review');
-
-  agent = { id: 'session-d' };
-  ctx.emit(...turnEnd(session));
-  await tick();
-  assert.equal(calls.length, 1, '下一轮应补上');
-  scheduler.dispose();
-});
-
-test('startActivation 抛错不冒泡，下一轮还能重试', async () => {
-  const dir = tempDir();
-  let attempts = 0;
-  const session = { id: 'session-e' };
-  const ctx = makeCtx({
-    agent: { id: 'session-e' },
-    startActivation: () => {
-      attempts += 1;
-      throw new Error('boom');
-    },
-  });
-  const scheduler = schedulerFor(dir, ctx);
-
-  for (let i = 0; i < 10; i += 1) ctx.emit(...turnEnd(session));
-  await tick();
-  assert.equal(attempts, 1, '第 10 轮尝试过一次');
-
-  ctx.emit(...turnEnd(session));
-  await tick();
-  assert.equal(attempts, 2, '失败后下一轮重试');
-  scheduler.dispose();
-});
-
-test('计数持久化：新实例能接着上一实例的进度', async () => {
-  const dir = tempDir();
-  const session = { id: 'session-f' };
-  // 第一个实例先跑 3 轮
-  const ctx1 = makeCtx({ agent: { id: 'session-f' } });
-  const scheduler1 = schedulerFor(dir, ctx1);
   for (let i = 0; i < 3; i += 1) ctx1.emit(...turnEnd(session));
   scheduler1.dispose();
-  assert.ok(fs.existsSync(path.join(dir, 'nudge-state.json')), '应写出状态文件');
 
-  // 新实例：再 7 轮才满 10
-  const calls = [];
-  const ctx2 = makeCtx({
-    agent: { id: 'session-f' },
-    startActivation: () => {
-      calls.push(1);
-      return Promise.resolve({ childId: 'child-f', result: new Promise(() => {}) });
-    },
+  const ctx2 = makeCtx();
+  const scheduler2 = createNudgeScheduler({
+    ctx: ctx2,
+    store: new MemoryStore({ dir }),
+    config: { dir, nudgeInterval: 10 },
   });
-  const scheduler2 = schedulerFor(dir, ctx2);
+  assert.equal(scheduler2.status().turns_since, 3);
   for (let i = 0; i < 6; i += 1) ctx2.emit(...turnEnd(session));
-  await tick();
-  assert.equal(calls.length, 0, '3+6=9 轮还不该触发');
+  assert.equal(scheduler2.status().due, false);
   ctx2.emit(...turnEnd(session));
-  await tick();
-  assert.equal(calls.length, 1, '第 10 轮触发');
+  assert.equal(scheduler2.status().due, true);
   scheduler2.dispose();
 });
 
-test('没有 subagents 服务时安静降级（不抛、不写坏状态）', async () => {
-  const dir = tempDir();
-  const session = { id: 'session-g' };
-  const ctx = makeCtx({ agent: { id: 'session-g' } });
-  const scheduler = schedulerFor(dir, ctx);
-  for (let i = 0; i < 12; i += 1) ctx.emit(...turnEnd(session));
+test("noticeMode:'off' 只记账本，不 inject；没有变化时提示未保存内容", async () => {
+  const { ctx, session, scheduler, reviewLog, injected } = setup({ interval: 1, noticeMode: 'off' });
+  ctx.emit(...turnEnd(session));
+  scheduler.finishReview(session.id);
+  assert.equal(reviewLog.count(), 1);
+  assert.equal(injected.length, 0);
+  scheduler.dispose();
+
+  const on = setup({ interval: 1, noticeMode: 'on' });
+  on.ctx.emit(...turnEnd(on.session));
+  on.scheduler.finishReview(on.session.id);
   await tick();
-  const state = JSON.parse(fs.readFileSync(path.join(dir, 'nudge-state.json'), 'utf8'));
-  assert.equal(state.sessions['session-g'].turns, 12, '降级时计数照常累加');
-  scheduler.dispose();
+  assert.equal(on.injected.length, 1);
+  assert.match(on.injected[0].content[0].text, /没有需要保存的内容/);
+  on.scheduler.dispose();
 });
 
-/* ------------------------- Phase 1：review 完成后的提示 ------------------------- */
-
-function memoryStoreStub(dir, initial = {}) {
-  const data = { memory: [...(initial.memory ?? [])], user: [...(initial.user ?? [])] };
-  return {
-    dir,
-    data,
-    load(target) {
-      return [...data[target]];
-    },
-  };
-}
-
-async function flush(times = 6) {
-  for (let i = 0; i < times; i += 1) await tick();
-}
-
-test('review 完成后 review-log 有记录（noticeMode: off 也不影响记录）', async () => {
-  const dir = tempDir();
-  const reviewLog = createReviewLog(dir);
-  const store = memoryStoreStub(dir, { memory: ['old note'] });
-  const session = { id: 'session-review-log' };
-  const injected = [];
-  const ctx = makeCtx({
-    agent: { id: 'session-review-log', inject: (message) => injected.push(message) },
-    startActivation: () => ({
-      childId: 'child-log',
-      result: Promise.resolve().then(() => {
-        store.data.memory = ['old note', 'new note'];
-      }),
-    }),
-  });
-  const scheduler = schedulerFor(dir, ctx, { store, reviewLog, noticeMode: 'off' });
-
-  for (let i = 0; i < 10; i += 1) ctx.emit(...turnEnd(session));
-  await flush();
-
-  assert.equal(reviewLog.count(), 1);
-  const entry = reviewLog.recent(1)[0];
-  assert.equal(entry.channel, 'review');
-  assert.equal(entry.session_id, 'session-review-log');
-  assert.equal(entry.child_id, 'child-log');
-  assert.deepEqual(entry.memory.added, ['new note']);
-  assert.match(entry.summary, /MEMORY \+1/);
-  assert.equal(injected.length, 0, 'off 档不 inject');
+test('dispose 后不再计数', () => {
+  const { ctx, session, scheduler, dir } = setup();
   scheduler.dispose();
-});
-
-test("noticeMode: 'on' 注入一条 developer 消息，含「记忆已更新」", async () => {
-  const dir = tempDir();
-  const store = memoryStoreStub(dir, { memory: [] });
-  const injected = [];
-  const session = { id: 'session-on' };
-  const ctx = makeCtx({
-    agent: { id: 'session-on', inject: (message) => injected.push(message) },
-    startActivation: () => ({
-      childId: 'child-on',
-      result: Promise.resolve().then(() => {
-        store.data.memory = ['remember this'];
-      }),
-    }),
-  });
-  const scheduler = schedulerFor(dir, ctx, { store, reviewLog: createReviewLog(dir), noticeMode: 'on' });
-
-  for (let i = 0; i < 10; i += 1) ctx.emit(...turnEnd(session));
-  await flush();
-
-  assert.equal(injected.length, 1);
-  const message = injected[0];
-  assert.equal(message.role, 'developer');
-  assert.deepEqual(message.source, { kind: 'memory-review' });
-  assert.match(message.content[0].text, /记忆已更新/);
-  assert.match(message.content[0].text, /详情见左侧栏/);
-  scheduler.dispose();
-});
-
-test("noticeMode: 'verbose' 额外带最多 3 条变更预览", async () => {
-  const dir = tempDir();
-  const longText = `very long memory entry ${'x'.repeat(120)}`;
-  const store = memoryStoreStub(dir, { memory: [] });
-  const injected = [];
-  const session = { id: 'session-verbose' };
-  const ctx = makeCtx({
-    agent: { id: 'session-verbose', inject: (message) => injected.push(message) },
-    startActivation: () => ({
-      childId: 'child-verbose',
-      result: Promise.resolve().then(() => {
-        store.data.memory = [longText, 'second', 'third', 'fourth'];
-      }),
-    }),
-  });
-  const scheduler = schedulerFor(dir, ctx, { store, reviewLog: createReviewLog(dir), noticeMode: 'verbose' });
-
-  for (let i = 0; i < 10; i += 1) ctx.emit(...turnEnd(session));
-  await flush();
-
-  assert.equal(injected.length, 1);
-  const text = injected[0].content[0].text;
-  assert.match(text, /\+ /, '新增条目要带 + 前缀');
-  assert.match(text, /very long memory entry/);
-  const previewLines = text.split('\n').slice(1);
-  assert.ok(previewLines.length <= 3, `最多 3 条预览，实际 ${previewLines.length}`);
-  scheduler.dispose();
-});
-
-test('inject 抛错不影响 review 完成与账本记录', async () => {
-  const dir = tempDir();
-  const reviewLog = createReviewLog(dir);
-  const store = memoryStoreStub(dir, { memory: [] });
-  const session = { id: 'session-inject-throw' };
-  const ctx = makeCtx({
-    agent: {
-      id: 'session-inject-throw',
-      inject: () => {
-        throw new Error('inject refused');
-      },
-    },
-    startActivation: () => ({
-      childId: 'child-throw',
-      result: Promise.resolve().then(() => {
-        store.data.memory = ['written'];
-      }),
-    }),
-  });
-  const scheduler = schedulerFor(dir, ctx, { store, reviewLog, noticeMode: 'on' });
-
-  for (let i = 0; i < 10; i += 1) ctx.emit(...turnEnd(session));
-  await flush();
-  assert.equal(reviewLog.count(), 1);
-  assert.deepEqual(reviewLog.recent(1)[0].memory.added, ['written']);
-  scheduler.dispose();
+  ctx.emit(...turnEnd(session));
+  assert.equal(loadReviewState(dir).turns_since_review, 0);
 });

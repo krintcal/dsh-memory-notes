@@ -16,6 +16,7 @@ window.__ModuleLoader__.load({
 			state: "api/dsh-memory-notes/state",
 			write: "api/dsh-memory-notes/write",
 			pending: "api/dsh-memory-notes/pending",
+			suggestions: "api/dsh-memory-notes/suggestions",
 		};
 
 		async function fetchJson(url, body) {
@@ -268,6 +269,60 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		function SuggestionsSection({ items, busy, onDecide }) {
+			if (!Array.isArray(items) || items.length === 0) return null;
+			return h(
+				"section",
+				{ style: card },
+				h(
+					"div",
+					{ style: { ...row, justifyContent: "space-between", marginBottom: "8px" } },
+					h("strong", { style: { fontSize: "14px" } }, "建议"),
+					h("span", { style: muted }, `${items.length} 条`),
+				),
+				h(
+					"div",
+					{ style: { ...muted, marginBottom: "10px" } },
+					"回顾时以 suggest 模式提交的记忆建议；采纳后才会真正写入对应记忆库。",
+				),
+				items.map((item) =>
+					h(
+						"div",
+						{ key: item.id, style: { ...card, padding: "10px 12px", marginBottom: "10px" } },
+						h(
+							"div",
+							{ style: { ...row, justifyContent: "space-between", marginBottom: "4px" } },
+							h("span", { style: { fontSize: "13px" } }, `${item.target} · ${formatClock(item.created_at)}`),
+							h(
+								"div",
+								{ style: row },
+								h(
+									"button",
+									{
+										style: primaryBtn,
+										disabled: busy,
+										onClick: () => onDecide({ id: item.id, decision: "accept" }),
+									},
+									"采纳",
+								),
+								h(
+									"button",
+									{ style: smallBtn, disabled: busy, onClick: () => onDecide({ id: item.id, decision: "discard" }) },
+									"丢弃",
+								),
+							),
+						),
+						h(
+							"div",
+							{ style: { ...muted, whiteSpace: "pre-wrap", wordBreak: "break-word" } },
+							item.text && item.text.length > 280 ? `${item.text.slice(0, 280)}…` : item.text || "",
+						),
+					),
+				),
+			);
+		}
+
+
 		function writeSummary(item) {
 			const values = [item.after, item.before, item.content, item.old_text];
 			const text = values.find((value) => typeof value === "string" && value.trim() !== "");
@@ -432,6 +487,11 @@ window.__ModuleLoader__.load({
 				[applyResult],
 			);
 
+			const onSuggest = react.useCallback(
+				(body) => applyResult(fetchJson(API.suggestions, body)),
+				[applyResult],
+			);
+
 			if (!state) {
 				return h(
 					"div",
@@ -442,6 +502,9 @@ window.__ModuleLoader__.load({
 
 			const memory = state.targets && state.targets.memory;
 			const user = state.targets && state.targets.user;
+			const key = state.targets && state.targets.key;
+			const project = state.targets && state.targets.project;
+			const daily = state.targets && state.targets.daily;
 
 			return h(
 				"div",
@@ -473,7 +536,7 @@ window.__ModuleLoader__.load({
 				h(
 					"div",
 					{ style: { ...muted, marginBottom: "14px" } },
-					"写入立即落盘；当前会话的系统提示词是会话开始时的冻结快照，下个会话才看到本次修改。",
+					"写入立即落盘；记忆块作为运行时上下文消息注入，内容变化时会在对话尾部追加新消息，本会话内写入下一轮即可见。",
 				),
 				error
 					? h(
@@ -491,7 +554,38 @@ window.__ModuleLoader__.load({
 					: null,
 				user ? h(StoreSection, { target: "user", title: "USER PROFILE · 用户是谁", subtitle: "偏好、期望、背景；一条事实只进一个库。", view: user, busy, onWrite }) : null,
 				memory ? h(StoreSection, { target: "memory", title: "MEMORY · 我的工作笔记", subtitle: "环境事实、工具怪癖、项目约定与路径。", view: memory, busy, onWrite }) : null,
+				key
+					? h(StoreSection, {
+							target: "key",
+							title: "KEY · 当前项目/分支要点",
+							subtitle: "按项目路径隔离并按 git 分支过滤；会注入上下文。",
+							view: key,
+							busy,
+							onWrite,
+						})
+					: null,
+				project
+					? h(StoreSection, {
+							target: "project",
+							title: "PROJECT LOG · 项目日志",
+							subtitle: "按项目路径隔离，作为工作日志，不注入上下文。",
+							view: project,
+							busy,
+							onWrite,
+						})
+					: null,
+				daily
+					? h(StoreSection, {
+							target: "daily",
+							title: "DAILY LOG · 每日日志",
+							subtitle: "按日期分文件，作为每日工作日志，不注入上下文。",
+							view: daily,
+							busy,
+							onWrite,
+						})
+					: null,
 				h(PendingSection, { items: state.pending, busy, onDecide }),
+				h(SuggestionsSection, { items: state.suggestions, busy, onDecide: onSuggest }),
 				h(ReviewsSection, { items: state.reviews }),
 				h(WritesSection, { items: state.writes, busy, onWrite }),
 			);
@@ -585,9 +679,13 @@ window.__ModuleLoader__.load({
 					add: "正在记住一条新记忆",
 					patch: "正在修改一条记忆",
 					remove: "正在删除一条记忆",
+					suggest: "正在提交一条记忆建议",
 					operations: "正在批量更新记忆",
 				}[action] || "正在更新记忆";
 				return { icon: "🧠", headline, detail: [where, clipText(args.content || args.old_text, 60)].filter(Boolean).join(" · ") };
+			}
+			if (action === "suggest") {
+				return { icon: "🧠", headline: "记忆建议已入队，等待确认", detail: clipText(args.content, 90) };
 			}
 			if (result.staged) return { icon: "🧠", headline: "记忆修改已提交，等待确认", detail: clipText(result.message, 160) };
 			switch (action) {

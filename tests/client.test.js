@@ -256,3 +256,24 @@ test("面板没有 review 记录时给出空态文案", async () => {
 	const text = await renderPanel(panelState());
 	assert.match(text, /还没有后台 review 记录/);
 });
+
+test("面板在 state 带 suggestions 时渲染建议区块与采纳/丢弃按钮", async () => {
+	const now = Date.now();
+	const text = await renderPanel(
+		panelState({
+			suggestions: [
+				{ id: "s1", created_at: now, target: "memory", text: "pnpm only after sync" },
+			],
+		}),
+	);
+	assert.match(text, /建议/);
+	assert.match(text, /memory/);
+	assert.match(text, /pnpm only after sync/);
+	assert.match(text, /采纳/);
+	assert.match(text, /丢弃/);
+});
+
+test("面板 suggestions 为空时不渲染建议区块", async () => {
+	const text = await renderPanel(panelState());
+	assert.doesNotMatch(text, /采纳/);
+});

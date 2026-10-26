@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "长期记忆",
-    "description": "Hermes 式长期记忆：两个纯文本记忆库，以冻结快照注入系统提示，通过 memory 工具增删改。"
+    "description": "Hermes 式长期记忆：分层纯文本记忆库，以运行时上下文注入，通过 memory 工具增删改，并在回合内自审。"
   }
 }

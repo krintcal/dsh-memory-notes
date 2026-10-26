@@ -1,9 +1,9 @@
 {
   "name": "dsh-memory-notes",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
-  "description": "Hermes-style long-term memory for DeepSeek Harness: two plain-text stores, one memory tool, frozen prompt snapshot.",
+  "description": "Hermes-style long-term memory for DeepSeek Harness: layered plain-text memory tracks, one memory tool, live runtime-context snapshot.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -36,3 +36,4 @@
   },
   "main": "index.js"
 }
+

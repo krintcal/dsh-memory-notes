@@ -24,6 +24,9 @@ export const PATCH_DROP_HINT =
 export const MEMORY_BLOCK_HEADERS = {
   memory: 'MEMORY (your personal notes)',
   user: 'USER PROFILE (who the user is)',
+  key: 'KEY (branch-scoped project notes)',
+  project: 'PROJECT LOG (this project)',
+  daily: 'DAILY LOG (today)',
 };
 
 export const TARGETS = ['memory', 'user'];
@@ -172,8 +175,8 @@ export function staleEntryMessage(entry) {
   );
 }
 
-function overLimitMessage(newTotal, limit) {
-  return `would put memory at ${fmt(newTotal)}/${fmt(limit)} chars: free at least ${fmt(newTotal - limit)} chars`;
+function overLimitMessage(newTotal, limit, target = 'memory') {
+  return `would put ${target} at ${fmt(newTotal)}/${fmt(limit)} chars: free at least ${fmt(newTotal - limit)} chars`;
 }
 
 /** 条目内容里出现 § 会静默变成多条记忆，所有写入口共用这一道校验。 */
@@ -186,10 +189,32 @@ function validateContent(value, target) {
 }
 
 export class MemoryStore {
-  constructor({ dir, memoryCharLimit = 2200, userCharLimit = 1375, onWrite } = {}) {
+  constructor({
+    dir,
+    memoryCharLimit = 2200,
+    userCharLimit = 1375,
+    keyCharLimit = 2200,
+    projectLogCharLimit = 8000,
+    dailyLogCharLimit = 6000,
+    files,
+    targets,
+    headers,
+    onWrite,
+  } = {}) {
     if (!dir) throw new Error('MemoryStore requires a dir');
     this.dir = dir;
-    this.limits = { memory: memoryCharLimit, user: userCharLimit };
+    this.limits = {
+      memory: memoryCharLimit,
+      user: userCharLimit,
+      key: keyCharLimit,
+      project: projectLogCharLimit,
+      daily: dailyLogCharLimit,
+    };
+    // 0.7.0 的分层记忆：files[target] 可以是相对 dir 的路径、绝对路径，或返回路径的函数
+    // （daily 的文件名随日期变化）。默认只开 memory / user 两轨，保持 0.6.0 行为。
+    this.files = { ...FILE_FOR, ...(files ?? {}) };
+    this.targets = Array.isArray(targets) && targets.length ? [...targets] : [...TARGETS];
+    this.headers = { ...MEMORY_BLOCK_HEADERS, ...(headers ?? {}) };
     this.cache = new Map(); // target -> string[] (load-time snapshot)
     this.onWrite = typeof onWrite === 'function' ? onWrite : undefined;
     // 调用方（工具层 / 面板）写前设置，store 读取后清空；batch 的所有 op 共用同一来源。
@@ -223,12 +248,17 @@ export class MemoryStore {
   }
 
   fileFor(target) {
-    return path.join(this.dir, FILE_FOR[target]);
+    const configured = this.files[target];
+    const value = typeof configured === 'function' ? configured() : configured;
+    if (typeof value !== 'string' || !value) {
+      throw new MemoryError(`Unknown target '${target}'. Use: ${this.targets.join(', ')}.`, { success: false, target });
+    }
+    return path.isAbsolute(value) ? value : path.join(this.dir, value);
   }
 
   assertTarget(target) {
-    if (!TARGETS.includes(target)) {
-      throw new MemoryError(`Unknown target '${target}'. Use: memory, user.`, { success: false, target });
+    if (!this.targets.includes(target)) {
+      throw new MemoryError(`Unknown target '${target}'. Use: ${this.targets.join(', ')}.`, { success: false, target });
     }
   }
 
@@ -366,8 +396,9 @@ export class MemoryStore {
       const outcome = mutate([...onDisk]);
       const next = Array.isArray(outcome) ? outcome : outcome.entries;
       const body = this.serialize(next);
-      const tmp = path.join(this.dir, `.mem_${path.basename(file)}.tmp`);
-      fs.mkdirSync(this.dir, { recursive: true });
+      const fileDir = path.dirname(file);
+      fs.mkdirSync(fileDir, { recursive: true });
+      const tmp = path.join(fileDir, `.mem_${path.basename(file)}.tmp`);
       fs.writeFileSync(tmp, body, 'utf8');
       fs.renameSync(tmp, file);
       this.cache.set(target, next);
@@ -465,7 +496,7 @@ export class MemoryStore {
         throw this.overflow(
           target,
           entries,
-          `Memory at ${this.usageShort(target)} chars; adding this entry (${value.length} chars) would exceed ` +
+          `${target} at ${this.usageShort(target)} chars; adding this entry (${value.length} chars) would exceed ` +
             `the limit by ${fmt(total - limit)} chars. Retry as ONE 'operations' batch that removes or shortens ` +
             `(patch) stale entries from current_entries below to free at least ${fmt(total - limit)} chars AND adds ` +
             'this entry — the limit is checked only on the batch result.',
@@ -513,7 +544,7 @@ export class MemoryStore {
         throw this.overflow(
           target,
           entries,
-          `Patch would put memory at ${fmt(total)}/${fmt(limit)} chars. Shorten the new text, or 'remove' other ` +
+          `Patch would put ${target} at ${fmt(total)}/${fmt(limit)} chars. Shorten the new text, or 'remove' other ` +
             'stale or less important entries to make room (see current_entries below), then retry — all in this turn.',
         );
       }
@@ -555,7 +586,7 @@ export class MemoryStore {
         throw this.overflow(
           target,
           entries,
-          `Replacement ${overLimitMessage(total, limit)}. Shorten the new content, or retry as ONE 'operations' batch ` +
+          `Replacement ${overLimitMessage(total, limit, target)}. Shorten the new content, or retry as ONE 'operations' batch ` +
             'with this replace plus removes/shortenings of other stale entries (see current_entries below) — the ' +
             'limit is checked only on the batch result.',
         );
@@ -691,7 +722,7 @@ export class MemoryStore {
     if (total > limit) {
       throw this.batchFailure(
         target,
-        `Applying all ${operations.length} operations ${overLimitMessage(total, limit)} more. Add removes or ` +
+        `Applying all ${operations.length} operations ${overLimitMessage(total, limit, target)} more. Add removes or ` +
           `shortening patches of other stale entries to the same batch, then retry.${note}`,
       );
     }
@@ -752,11 +783,17 @@ export class MemoryStore {
   }
 
   /** 对应 Hermes 的 _render_block：46 个 ═ 的框 + 用量百分比。 */
-  render(target) {
+  renderEntries(target, entries) {
     this.assertTarget(target);
-    const entries = this.entries(target);
     if (entries.length === 0) return '';
-    const header = `${MEMORY_BLOCK_HEADERS[target]} [${this.usagePct(target)}]`;
+    const total = this.serialize(entries).length;
+    const limit = this.limit(target);
+    const pct = limit > 0 ? Math.min(100, Math.floor((total / limit) * 100)) : 0;
+    const header = `${this.headers[target]} [${pct}% — ${fmt(total)}/${fmt(limit)} chars]`;
     return `${SEP}\n${header}\n${SEP}\n${this.serialize(entries)}`;
+  }
+
+  render(target) {
+    return this.renderEntries(target, this.entries(target));
   }
 }

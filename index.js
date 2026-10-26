@@ -1,13 +1,14 @@
 /**
  * dsh-memory-notes — Host 半边。
  *
- * 只做三件事：
- *  1) 解析配置 / 默认目录，建一个 MemoryStore；
- *  2) 注册 `memory` 工具（定义在 src/tool.js）；
- *  3) 注册 `memory` 系统提示词段，内容是会话开始时冻结的快照。
+ * 只做这几件事：
+ *  1) 解析配置 / 默认目录，建一个分层 MemoryStore（memory/user/key/project/daily）；
+ *  2) 注册 `memory` / `memory_review_status` 工具；
+ *  3) 注册 `memory:snapshot` 运行时上下文（context，而不是 section）：每个 step
+ *     现算，内容变化时宿主会在对话尾部追加一条新的 user-role 消息。
  *
- * 冻结快照是 Hermes 的 prompt-cache 语义：同一会话内后续写入不改变本会话
- * 已经注入的文本，改动从下一个会话开始可见。
+ * 0.7.0 起不再冻结快照：本会话内写入下一轮即可见，同时保留 prompt 前缀缓存
+ * （文本没变就不会 append）。
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -18,17 +19,25 @@ import { createPendingStore } from './src/pending.js';
 import { createCurator } from './src/curator.js';
 import { createNudgeScheduler } from './src/nudge.js';
 import { createReviewLog } from './src/review-log.js';
+import { loadReviewState, reviewStatus } from './src/review-state.js';
+import { reviewToolDefinition } from './src/review-tool.js';
 import { createSkillLibrary } from './src/skills.js';
 import { skillToolDefinition } from './src/skill-tool.js';
+import { renderLiveSnapshot } from './src/snapshot.js';
+import {
+  count as countSuggestions,
+  drop as dropSuggestion,
+  enqueue as enqueueSuggestion,
+  list as listSuggestions,
+  take as takeSuggestion,
+} from './src/suggestions.js';
 import { toolDefinition } from './src/tool.js';
+import { createTracks, primeBranch } from './src/tracks.js';
 import { registerWebPanel } from './src/web.js';
 import { createWriteLog } from './src/write-log.js';
 
 export const name = 'memory-notes';
 export const inject = ['tools', 'systemPrompt'];
-
-const SNAPSHOT_NOTE =
-  'Persistent memory loaded at session start. Use the memory tool to add, patch, or remove entries; writes apply to the next session. A background review may propose destructive edits, which wait in the pending queue for approval.';
 
 /** 本机桌面端会设置 DSH_PROFILE_DIR（如 …/profiles/desktop）；只设 DSH_PROFILE 时按约定推导。 */
 function resolveProfileDir() {
@@ -50,6 +59,24 @@ function resolveDir(config) {
   if (process.env.DSH_MEMORY_DIR) return { dir: process.env.DSH_MEMORY_DIR, profileScoped: false };
   const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh');
   return { dir: path.join(home, 'memories'), profileScoped: false };
+}
+
+/**
+ * workspace cwd：显式 config.cwd 优先；否则问宿主 workspace 服务；最后退到 process.cwd()。
+ * 显式传 null 表示「没有 cwd」，项目轨会落到 projects/global。
+ */
+function resolveCwd(config, ctx) {
+  if (Object.prototype.hasOwnProperty.call(config, 'cwd')) {
+    return typeof config.cwd === 'string' && config.cwd ? config.cwd : undefined;
+  }
+  try {
+    const service = typeof ctx?.get === 'function' ? ctx.get('workspace') : ctx?.workspace;
+    const cwd = service?.cwd ?? ctx?.cwd;
+    if (typeof cwd === 'string' && cwd) return cwd;
+  } catch {
+    /* 宿主没有 workspace 服务 */
+  }
+  return process.cwd();
 }
 
 /**
@@ -81,43 +108,69 @@ function resolveSkillsDir(config) {
   return path.join(os.homedir(), '.agents', 'skills');
 }
 
-/** 会话标识可能藏在 scope.id / scope.session.id / session.id，全部容错。 */
-function sessionKey(args) {
-  if (!args || typeof args !== 'object') return undefined;
-  const scope = args.scope;
-  const id = scope?.id ?? scope?.session?.id ?? args.session?.id;
-  return typeof id === 'string' && id ? id : undefined;
-}
-
-/** 一次磁盘读取；任何异常都退化成空串，绝不把提示词组装搞挂。 */
-function readBlocks(store) {
-  try {
-    return [store.render('memory'), store.render('user')].filter(Boolean).join('\n\n');
-  } catch {
-    return '';
-  }
-}
-
-function compose(body) {
-  return body ? `${SNAPSHOT_NOTE}\n\n${body}` : '';
-}
-
 export function apply(ctx, config = {}) {
   const resolved = resolveDir(config);
   if (resolved.profileScoped) migrateLegacyMemories(resolved.dir);
+
+  const cwd = resolveCwd(config, ctx);
+  const tracks = createTracks({
+    dir: resolved.dir,
+    cwd,
+    layered: config.layeredTargets !== false,
+    limits: {
+      memoryCharLimit: config.memoryCharLimit ?? 2200,
+      userCharLimit: config.userCharLimit ?? 1375,
+      keyCharLimit: config.keyCharLimit ?? 2200,
+      projectLogCharLimit: config.projectLogCharLimit ?? 8000,
+      dailyLogCharLimit: config.dailyLogCharLimit ?? 6000,
+    },
+  });
 
   const writeLog = createWriteLog(resolved.dir);
   const reviewLog = createReviewLog(resolved.dir);
   const store = new MemoryStore({
     dir: resolved.dir,
-    memoryCharLimit: config.memoryCharLimit ?? 2200,
-    userCharLimit: config.userCharLimit ?? 1375,
+    ...tracks.limits,
+    files: tracks.files,
+    targets: tracks.targets,
     onWrite: (record) => writeLog.append(record),
   });
+  if (cwd) void primeBranch(cwd);
 
   const pendingDir = config.pendingDir ?? path.join(store.dir, 'pending');
   // tool 与面板共用同一个待确认队列：面板里看到的就是工具列表里的那批记录。
   const pending = createPendingStore(pendingDir);
+
+  // 回顾建议队列：memory 工具的 action:'suggest' 与面板的「采纳/丢弃」共用。
+  const suggestions = {
+    enqueue: (record) => enqueueSuggestion(store.dir, record),
+    list: () => listSuggestions(store.dir),
+    take: (id) => takeSuggestion(store.dir, id),
+    drop: (id) => dropSuggestion(store.dir, id),
+    count: () => countSuggestions(store.dir),
+  };
+
+  const reviewInterval = Math.max(1, Number(config.reviewInterval ?? config.nudgeInterval ?? 10) || 10);
+  const reviewMode = config.reviewMode === 'auto' ? 'auto' : 'suggest';
+
+  // 0.7.0：review 不再起 fork；调度器只记回合数、到点捕获 before 快照、等 complete。
+  let scheduler;
+  if (config.reviewEnabled !== false) {
+    scheduler = createNudgeScheduler({
+      ctx,
+      store,
+      config: {
+        dir: store.dir,
+        nudgeInterval: reviewInterval,
+        reviewInterval,
+        reviewMode,
+        noticeMode: config.noticeMode ?? 'on',
+        prompt: config.reviewPrompt,
+        reviewLog,
+      },
+    });
+    if (typeof ctx.effect === 'function') ctx.effect(() => () => scheduler.dispose());
+  }
 
   const toolDeps = {
     store,
@@ -125,6 +178,7 @@ export function apply(ctx, config = {}) {
     // 后台 review 的破坏性写入落在这里，等主会话确认
     pendingDir,
     pending,
+    suggestions,
     config: { approvalMode: config.approvalMode ?? 'ask' },
   };
   // 宿主服务一律懒取：apply 时 approval / agents 可能还没注册。
@@ -146,9 +200,32 @@ export function apply(ctx, config = {}) {
   }
   ctx.tools.register(toolDefinition(toolDeps));
 
+  if (scheduler) {
+    ctx.tools.register(
+      reviewToolDefinition({
+        dir: store.dir,
+        interval: reviewInterval,
+        mode: reviewMode,
+        suggestions,
+        scheduler,
+      }),
+    );
+  }
+
   // 左侧栏「记忆」面板的宿主半边（可选服务 webServer，CLI 宿主没有就自动跳过）。
   if (config.webPanelEnabled !== false) {
-    registerWebPanel(ctx, { store, pending, reviewLog, writeLog });
+    registerWebPanel(ctx, {
+      store,
+      pending,
+      reviewLog,
+      writeLog,
+      suggestions,
+      review: () => {
+        if (!scheduler) return { due: false, turns_since: 0, interval: reviewInterval, mode: 'off' };
+        const status = reviewStatus(loadReviewState(store.dir), reviewInterval);
+        return { due: status.due, turns_since: status.turns_since, interval: status.interval, mode: reviewMode };
+      },
+    });
   }
 
   // Phase 3：技能写入（自我进化的「写」半边；读的技能索引仍由 DSH 自带 skills 提供方负责）。
@@ -200,60 +277,40 @@ export function apply(ctx, config = {}) {
     );
   }
 
-  const snapshots = new Map(); // sessionId -> frozen text
   const skillsHint =
     config.skillsEnabled === false
       ? ''
-      : '\n\nTo keep a reusable procedure, write a skill with the skill_manage tool (create / patch).';
+      : 'To keep a reusable procedure, write a skill with the skill_manage tool (create / patch).';
 
-  ctx.systemPrompt.section({
-    name: 'memory',
-    order: 9000,
-    text: (args) => {
-      const key = sessionKey(args);
-      // 无会话标识 ⇒ 没有可冻结的边界，每次重新读。
-      if (!key) return compose(readBlocks(store)) + skillsHint;
-      if (snapshots.has(key)) return snapshots.get(key);
-      // 冻结之前先从盘上重读一次：宿主进程常驻，缓存会把别的进程（CLI／另一实例）
-      // 或重启前写入的条目挡在外面，表现成「明明记了却没生效」。
-      try {
-        store.load('memory');
-        store.load('user');
-      } catch {
-        /* 读不出来就退回缓存，绝不让提示词组装抛错 */
-      }
-      const frozen = compose(readBlocks(store)) + skillsHint;
-      snapshots.set(key, frozen);
-      // 简单 LRU：宿主里会话很多时，避免每个会话的冻结文本都常驻。
-      if (snapshots.size > 256) {
-        const oldest = snapshots.keys().next().value;
-        if (oldest !== undefined) snapshots.delete(oldest);
-      }
-      return frozen;
-    },
-  });
-
-  // Phase 2：每 nudgeInterval 个回合在后台起一个 review fork，把值得记的内容写进来。
-  // 注意：不能把 subagents 写进 inject（精简宿主没有它就会卡住不激活），也不能直接读
-  // ctx.subagents（cordis 对未声明服务会抛错）。这里也**不能**在 apply 时 gate 掉：
-  // 服务是后注册的，apply 时 ctx.get('subagents') 还是 undefined，会把调度器一起关掉。
-  // 服务一律在真正要派发时懒取（见 src/nudge.js）。
-  if (config.reviewEnabled !== false && typeof ctx.on === 'function') {
-    const scheduler = createNudgeScheduler({
-      ctx,
-      store,
-      config: {
-        dir: store.dir,
-        stateFile: config.stateFile,
-        nudgeInterval: config.nudgeInterval ?? 10,
-        provider: config.provider ?? 'fork',
-        memoryEnabled: config.memoryEnabled !== false,
-        skillsEnabled: config.skillsEnabled !== false,
-        prompt: config.reviewPrompt,
-        noticeMode: config.noticeMode ?? 'on',
-        reviewLog,
-      },
-    });
-    ctx.effect(() => () => scheduler.dispose());
+  function reviewView() {
+    if (!scheduler) return undefined;
+    const status = reviewStatus(loadReviewState(store.dir), reviewInterval);
+    return { due: status.due, turns_since: status.turns_since, interval: status.interval };
   }
+
+  /** 每次 step 现算；任何异常都退化成空串，绝不让宿主步骤失败。 */
+  function renderLive() {
+    try {
+      if (cwd) void primeBranch(cwd);
+      return renderLiveSnapshot({
+        store,
+        layout: tracks,
+        review: reviewView(),
+        reviewMode,
+        skillsHint,
+      });
+    } catch (error) {
+      console.warn(`[memory-notes] live snapshot failed: ${error?.message ?? error}`);
+      return '';
+    }
+  }
+
+  const snapshotContext = {
+    name: 'memory:snapshot',
+    order: config.snapshotOrder ?? 9000,
+    text: () => renderLive(),
+  };
+  // context 是 user-role 尾部消息，只在文本变化时追加；section 会改整个系统提示词。
+  if (typeof ctx.systemPrompt.context === 'function') ctx.systemPrompt.context(snapshotContext);
+  else ctx.systemPrompt.section(snapshotContext);
 }

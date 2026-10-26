@@ -35,12 +35,16 @@ function countPart(diff = {}) {
 }
 
 export function summarizeDiff(diff = {}) {
-  return `MEMORY ${countPart(diff.memory)} · USER ${countPart(diff.user)}`;
+  const parts = [`MEMORY ${countPart(diff.memory)}`, `USER ${countPart(diff.user)}`];
+  // 0.7.0：key 轨只有真的参与 diff 时才追加，保持旧记录/旧测试的文案不变。
+  if (diff.key !== undefined) parts.push(`KEY ${countPart(diff.key)}`);
+  return parts.join(' · ');
 }
 
 export function isEmptyDiff(diff = {}) {
-  return ['memory', 'user'].every((target) => {
-    const part = diff?.[target] ?? {};
+  return ['memory', 'user', 'key'].every((target) => {
+    if (diff?.[target] === undefined) return true;
+    const part = diff[target] ?? {};
     return !(
       (part.added?.length ?? 0) > 0 ||
       (part.removed?.length ?? 0) > 0 ||
@@ -88,29 +92,34 @@ export function createReviewLog(dir) {
     fs.renameSync(tmp, file);
   }
 
+  function record(entry = {}) {
+    const now = Date.now();
+    const full = {
+      id: id(),
+      started_at: now,
+      finished_at: now,
+      ...entry,
+    };
+    try {
+      const entries = read();
+      entries.push(full);
+      write(entries.length > MAX_ENTRIES ? entries.slice(-MAX_ENTRIES) : entries);
+    } catch (error) {
+      try {
+        console.warn(`[memory-notes] failed to record review: ${error?.message ?? error}`);
+      } catch {
+        /* ignore */
+      }
+    }
+    return full;
+  }
+
   return {
     file,
-    record(entry = {}) {
-      const now = Date.now();
-      const full = {
-        id: id(),
-        started_at: now,
-        finished_at: now,
-        ...entry,
-      };
-      try {
-        const entries = read();
-        entries.push(full);
-        write(entries.length > MAX_ENTRIES ? entries.slice(-MAX_ENTRIES) : entries);
-      } catch (error) {
-        try {
-          console.warn(`[memory-notes] failed to record review: ${error?.message ?? error}`);
-        } catch {
-          /* ignore */
-        }
-      }
-      return full;
+    append(entry = {}) {
+      return record(entry);
     },
+    record,
     recent(n = 10) {
       const size = Math.max(0, Number(n) || 0);
       if (size === 0) return [];

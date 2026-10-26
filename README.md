@@ -1,16 +1,20 @@
 # dsh-memory-notes
 
-Hermes 式长期记忆的 DSH Host 插件。它给模型一个 `memory` 工具，并在系统提示词里注入一段「冻结快照」式的记忆块。
+Hermes 式长期记忆的 DSH Host 插件。它给模型一个 `memory` 工具，并把分层记忆块作为**运行时上下文消息**注入（内容变化时在对话尾部追加新消息，本会话内写入下一轮即可见）。
 
 ## 它做什么
 
-- 两个纯文本记忆库，条目之间用单独一行 `§` 分隔：
-  - `<dshHome>/memories/MEMORY.md` —— 模型自己的笔记；
-  - `<dshHome>/memories/USER.md` —— 用户画像 / 偏好 / 期望。
-- 配额按字符计：`memory` 默认 2200，`user` 默认 1375，含分隔符。超限直接拒绝写入，绝不截断。
-- `memory` 工具支持 `add` / `patch` / `remove`，或用 `operations` 数组做原子批处理（配额只按最终结果校验，所以可以先删后加）。`patch` 只替换条目内的一个 span，条目其余保留；整条重写就把整条放进 `old_text`。
-- 系统提示里的记忆块在**会话开始时冻结**：本会话内的写入不会改变已注入的文本，改动从下一个会话开始可见（prompt-cache 语义）。
-- 0.4.0 起带一个**左侧栏「记忆」面板**：看两个库的条目与配额、就地改写/删除/新增条目、批准后台 review 排队中的破坏性写入。
+- 五条纯文本记忆轨，条目之间用单独一行 `§` 分隔：
+  - `MEMORY.md` —— 模型自己的笔记；
+  - `USER.md` —— 用户画像 / 偏好 / 期望；
+  - `projects/<hash>/KEY.md` —— 按 git 分支过滤的项目要点；
+  - `projects/<hash>/PROJECT.md` —— 项目进展日志（不注入快照）；
+  - `daily/<YYYY-MM-DD>.md` —— 当天小结（不注入快照）。
+- 配额按字符计：`memory` / `user` / `key` / `project` / `daily` 默认 2200 / 1375 / 2200 / 8000 / 6000，含分隔符。超限直接拒绝写入，绝不截断。
+- `memory` 工具支持 `add` / `patch` / `remove` / `suggest`，或用 `operations` 数组做原子批处理（配额只按最终结果校验，所以可以先删后加）。`patch` 只替换条目内的一个 span，条目其余保留；整条重写就把整条放进 `old_text`。
+- 记忆块通过 `ctx.systemPrompt.context()` 注入：每个 step 现算，**内容变化时**宿主在对话尾部追加一条新的 user-role 消息；同样的数据会生成逐字节相同的文本，所以前缀缓存保持稳定。
+- 0.4.0 起带一个**左侧栏「记忆」面板**：看记忆库的条目与配额、就地改写/删除/新增条目、批准后台 review 排队中的破坏性写入、采纳/丢弃回顾建议。
+- 0.7.0 起改为**回合内自审**：每 `nudgeInterval` 轮在快照里提示模型自己完成回顾，写完后调用 `memory_review_status complete` 结算；不再启动 fork 子代理。
 
 ## 安装
 
@@ -38,12 +42,19 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
 | `profileScoped` | `true` | 有 profile 环境变量时，记忆落在 profile 目录（`DSH_PROFILE_DIR/memories` 或 `DSH_HOME/profiles/<DSH_PROFILE>/memories`） |
 | `memoryCharLimit` | `2200` | `MEMORY.md` 配额 |
 | `userCharLimit` | `1375` | `USER.md` 配额 |
-| `nudgeInterval` | `10` | 每多少个回合触发一次后台 review |
-| `reviewEnabled` | `true` | 关掉后台 review |
-| `memoryEnabled` | `true` | 后台 review 里是否包含记忆回顾 |
-| `reviewPrompt` | — | 覆盖后台 review 的提示词全文 |
-| `provider` | `fork` | review 子会话用 `fork`（继承父上下文）还是 `spawn` |
-| `noticeMode` | `'on'` | review 完成后的主会话提示：`on` / `verbose`（附 3 条预览）/ `off` |
+| `keyCharLimit` | `2200` | `KEY.md` 配额 |
+| `projectLogCharLimit` | `8000` | `PROJECT.md` 配额 |
+| `dailyLogCharLimit` | `6000` | `daily/<date>.md` 配额 |
+| `layeredTargets` | `true` | 关掉后 `memory` 工具只保留 `memory` / `user` 两轨（0.6.0 行为） |
+| `nudgeInterval` | `10` | 每多少个用户回合提示一次回顾（旧键名，仍生效） |
+| `reviewInterval` | — | 若提供则覆盖 `nudgeInterval` |
+| `reviewMode` | `'suggest'` | 回顾写入走建议队列（`suggest`）还是直接写（`auto`） |
+| `snapshotOrder` | `9000` | 记忆 context 的注册顺序 |
+| `reviewEnabled` | `true` | 关掉回合内回顾与 `memory_review_status` 工具 |
+| `memoryEnabled` | `true` | 兼容旧配置；回顾提示里是否强调记忆（0.7.0 主要影响提示文案） |
+| `reviewPrompt` | — | 覆盖技能 review 的提示词全文（供外部 review 使用） |
+| `provider` | `fork` | **deprecated（0.7.0）**：review 不再启动子代理，仅 curator 合并时使用 |
+| `noticeMode` | `'on'` | 回顾完成后的主会话提示：`on` / `verbose`（附 3 条预览）/ `off` |
 | `approvalMode` | `'ask'` | 破坏性写入的审批策略：`ask`（`ctx.approval`）/ `stage`（直接排队）/ `auto`（直接写） |
 | `skillsDir` | `$DSH_SKILLS_DIR` → `~/.agents/skills` | `skill_manage` 写技能的位置 |
 | `skillsEnabled` | `true` | 关掉 `skill_manage` 工具 |
@@ -97,7 +108,7 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
   守卫：只接受回环来源（拒绝 `x-forwarded-for` / 跨站 `sec-fetch-site` / 外站 origin），请求体上限 1 MiB，写失败回 `{ok:false, error}`。
 - **客户端** `client.js`：`window.__ModuleLoader__.load` 格式的 bundle（`dsh.client.platform: "web"`），注册
   `sidebar.panellist`（图标 + 文案「记忆」）与 `main` 面板页；页面用文档相对路径 `api/dsh-memory-notes/*` 取数，
-  所以子路径部署也正常。面板里能直接看到「写入立即落盘，但本会话提示词是冻结快照」的提示。
+  所以子路径部署也正常。面板里能直接看到「记忆块作为运行时上下文消息注入，本会话内写入下一轮即可见」的提示。
 - **共用 pending 队列** `src/pending.js`：`memory` 工具的三个 pending 动作与面板共用同一批 `<dir>/pending/*.json`，
   抽出后 `tool.js` 不再各自实现一份。
 - 面板写入与工具调用完全同语义（同一 `MemoryStore` 方法、同一超限/歧义/stale 错误文案），区别只是入口是 GUI。
@@ -179,16 +190,81 @@ per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默
   要求它把「可合并/可删除」的建议以 `stage` 动作提交，而不是直接改写技能库；
   默认 `'off'`，与 Hermes 的保守默认一致。
 
-## Phase 2：后台 review（已实现）
+## 0.7.0：分层记忆 / 回合内自审 / 快照实时化
 
-`src/nudge.js` 监听 `session/event` 的 `turn/end`，按 `nudgeInterval` 计数，到点用
-`ctx.subagents.startActivation({ provider, request: { parent }, delivery: 'caller' })` 起一个后台子会话，
-让它在不打扰主对话的前提下把「值得长期记住的东西」写进记忆。
+### A. 分层记忆（五轨）
 
-- 计数存在 `<dir>/nudge-state.json`，宿主重启后接着数。
-- review 子会话自己的 `turn/end` 不计入（否则会自我触发）。
-- 子会话跑完即丢弃，主会话的 prompt cache 不受影响 —— 和 Hermes 的做法一致。
-- `subagents` 服务懒取：精简宿主没有它时只打一条 warning，不让插件整体失效。
+新增 `src/tracks.js`，记忆根目录下多出四条轨（`<hash>` = `sha256(workspace cwd)` 前 12 位，无 cwd 时为 `global`）：
+
+| track | 文件 | 默认配额 | 注入快照 |
+| --- | --- | --- | --- |
+| `memory` | `<dir>/MEMORY.md` | 2200 | 是 |
+| `user` | `<dir>/USER.md` | 1375 | 是 |
+| `key` | `<dir>/projects/<hash>/KEY.md` | 2200 | 是（按分支过滤） |
+| `project` | `<dir>/projects/<hash>/PROJECT.md` | 8000 | 否 |
+| `daily` | `<dir>/daily/<YYYY-MM-DD>.md` | 6000 | 否 |
+
+- 项目目录写一次 `meta.json`：`{ cwd, label, updated_at }`；cwd 变了才重写。
+- `key` 条目末尾可写 `[branch:main,release]`：没有标签 → 注入；有标签且包含当前分支 → 注入；
+  **当前分支未知 → 全量注入（绝不隐藏）**。标签原样保留在文件里。
+- 分支由 `currentBranch(cwd)` 探测：`git -C <cwd> rev-parse --abbrev-ref HEAD`，2 秒超时，
+  成功缓存 60 秒；非 git / 失败安静返回 `undefined`。
+- `memory` 工具的 `target` 扩到五轨；`layeredTargets: false` 时退回 `memory` / `user` 两轨。
+  `operations` 批量仍只允许同一 target，配额只在最终态校验。
+- 左侧栏「记忆」面板渲染全部五轨（另有 `KEY · 当前项目/分支要点`、`PROJECT LOG`、`DAILY LOG`
+  三段），编辑、删除、新增与 `memory` 工具走同一套写路径。
+- 新增配额键：`memoryCharLimit` / `userCharLimit` / `keyCharLimit` / `projectLogCharLimit` /
+  `dailyLogCharLimit`。超限依旧拒绝写入、不截断，文案沿用旧 `overflow()` 风格（换成对应 track 名）。
+
+### B. 回合内自我审查（替换 fork review）
+
+- `src/review-state.js` 维护 `<dir>/review-state.json`：
+  `{ turns_since_review, total_turns, last_review_at, due_since, last_completed_at }`。
+  坏文件/缺失按空状态处理，写失败只 `console.warn`。
+- `src/nudge.js` 仍只监听 `session/event` 的 `turn/end`，但**不再启动任何子代理**：
+  - 每个用户回合 `recordTurn`；到点后捕获「回顾窗口前」的 memory/user/key 条目快照（内存 Map）。
+    实现上按 `turn/end` 计数，所以系统唤醒（followup）的回合也会计入，回顾可能比纯人回合略早触发；
+  - review / curator 子会话不计数；
+  - 快照里固定提示：「自上次回顾 N/M 轮」；到期时提示本轮先用 `memory` 工具完成回顾，
+    完成后调用 `memory_review_status` 的 `complete`。
+- `memory_review_status`（`src/review-tool.js`）：
+  - `status` 返回 `{ due, turns_since, interval, last_review_at, last_completed_at, mode, suggestions_pending }`；
+  - `complete` 只应在真正回顾后调用：读取 before 快照 → 当前条目 → `diffEntries` / `summarizeDiff`
+    → 写 `review-log`（`channel:'review'`）→ inject developer 消息 → 清零计数；
+  - `reviewEnabled: false` 时不注册。
+- **建议队列** `src/suggestions.js`：`<dir>/SUGGESTIONS.jsonl`，最多 200 条，
+  记录 `{ id, created_at, target, text, source }`。
+  - `memory` 工具新增 `action:'suggest'`（target 仅 memory/user/key），同一内容未处理时幂等；
+  - `reviewMode: 'suggest'`（默认）走建议队列，`'auto'` 直接写；
+  - 面板 `state` 增加 `suggestions`（最近 20）与 `review`，新增
+    `POST /api/dsh-memory-notes/suggestions` `{id, decision:'accept'|'discard'}`；
+    采纳失败（如内容含 `§`）时保留建议并回 `{ok:false,...}`；
+  - 客户端新增「建议」区块（Pending 之后、Reviews 之前），每条带「采纳」「丢弃」。
+
+### C. 快照实时化
+
+- 删除 `snapshots` Map 与按 session 冻结逻辑，改用：
+
+  ```js
+  ctx.systemPrompt.context({
+    name: 'memory:snapshot',
+    order: config.snapshotOrder ?? 9000,
+    text: () => renderLiveSnapshot(...),
+  });
+  ```
+
+  `context` 是 user-role 尾部消息，agent-loop 只在渲染文本变化时 append 一条；因此本会话内
+  写入下一轮即可见，而前缀缓存仍然稳定。
+- 组装顺序：`memory` → `user` → `key`（过滤后）→ 空行 → 每回合收尾提示 → 回顾状态行 →
+  （分支已知时）分支行。
+- 渲染只包含数据与固定文案：没有时间戳、随机 id 或与数据无关的计数，同样数据逐字节一致。
+- `renderLiveSnapshot` 全程 `try/catch`，异常返回 `''` 并 `console.warn`，绝不让宿主步骤失败。
+
+## Phase 2（0.6.0 及以前）：后台 fork review（已被 0.7.0 替换）
+
+旧版 `src/nudge.js` 按 `nudgeInterval` 计数，到点用 `ctx.subagents.startActivation(...)` 起一个后台
+子会话写记忆。0.7.0 起这条路径已删除，`provider` 配置仅 curator 合并时仍会用到；保留本节只为解释
+旧日志与旧配置。
 
 ## Phase 3：技能写入（已实现）
 
@@ -223,9 +299,12 @@ per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默
 
 ## 已知取舍
 
-- **review 用 fork 会继承整段父上下文**（`startActivation({ provider: 'fork' })`）。这是为了
-  让它真的"看见"对话，但长会话下每 10 轮会把整段历史再喂一次模型，代价随长度线性上涨。
-  需要省 token 时把 `provider` 改成 `spawn`（子会话看不到历史，只适合做纯整理）。
+- **回合内回顾依赖模型遵守提示**：到点后只有模型主动完成回顾并调用 `memory_review_status complete`
+  才会清零；没调用就下一轮继续提示（宁可重复提醒，也不假装完成）。
+- **建议队列是 JSONL**：`SUGGESTIONS.jsonl` 采用整文件重写，最多 200 条；适合单机单进程，
+  不做跨进程锁。
+- **0.7.0 的 review 不再起 fork**：代价从「每 N 轮重喂整段历史」变成「依赖主模型自觉」；
+  curator 的合并建议仍可能用 fork（`provider` 仅在那里生效）。
 - **curator 的归档有 15s 宽限**：状态文件写失败时用内存时间戳兜底，避免每回合重跑。
 - **记忆配额按 UTF-16 码元计**（`String.length`）；Hermes 是 Python 码点，emoji 多时数字会不同。
 - **面板写入/撤销不弹审批**：面板路由没有打开中的 agent turn，`ctx.approval.request` 的前置条件不成立，
@@ -246,4 +325,6 @@ node tests/skills.test.js        # 单文件（有些沙箱里 --test 的逐文�
 pending 批准按 pin 重放、stale 拒绝并保留记录、缺 pin 的旧记录 fail-closed，以及回环守卫的七种场景。
 0.6.0 新增 `tests/review-log.test.js`、`tests/write-log.test.js`，并在 `nudge` / `tool` / `client` /
 `store` / `curator` 各补一组：review 提示三档、审批六种返回、面板区块与撤销文案、近似重复只告警不拦截、
-curator 建议制与降级。当前全量 **105 pass / 0 fail**。
+curator 建议制与降级。0.7.0 新增 `tests/tracks.test.js`、`tests/review-state.test.js`、
+`tests/suggestions.test.js`、`tests/review-tool.test.js`、`tests/snapshot.test.js`，并覆盖 web 的建议采纳/丢弃与客户端的建议区块。
+当前全量 **141 pass / 0 fail**。

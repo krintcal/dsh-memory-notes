@@ -1,21 +1,18 @@
 /**
- * Phase 2：后台记忆 / 技能 review 调度器。
+ * Phase 2（0.7.0 改造）：回合内自我审查调度器。
  *
- * 文案对齐 Hermes Agent 0.22.5 `agent/background_review.py`：
- *  - _MEMORY_ROUTING_BLOCK：两个 store 的分工，一条事实只进一个 store；
- *  - _MEMORY_REVIEW_PROMPT：只做「值得长期记住」的那一次写入，没有就 Nothing to save.；
- *  - _SKILL_REVIEW_PROMPT：Be ACTIVE，优先更新真正用过的技能，写规则 + 原因，不抄 AGENTS.md；
- *  - _COMBINED_REVIEW_PROMPT：两者都开时合并成一次 review（默认）。
+ * 旧版每 N 轮用 `subagents.startActivation` 起一个 fork 子会话做 review；0.7.0
+ * 不再启动任何子代理，改成：
+ *  - 每个用户会话的 turn/end 记一次账（`review-state.json`）；
+ *  - 到点的回合在内存里捕获「回顾窗口前」的 memory/user/key 条目快照；
+ *  - 快照里提示主会话当轮完成回顾；
+ *  - 主会话写完（直写或 suggest 入队）后调用 `memory_review_status complete`，
+ *    这里再算 diff、写 review-log、inject 一条 developer 消息并清零计数。
  *
- * 三条硬约束：
- *  - 监听器里绝不抛异常（宿主会被打断），失败只 console.warn；
- *  - review 子会话自己的 turn/end 不计数，避免自我触发；
- *  - 起不来（无 agents / 无 subagents / 抛错）时保留计数，下一轮重试。
+ * 三条硬约束：监听器里绝不抛异常；review/curator 子会话不计入；没 complete 就
+ * 不清零（宁可下一次继续提示，也不假装回顾完成了）。
  */
-import fs from 'node:fs';
-import path from 'node:path';
-
-import { clearReviewSession, markReviewSession } from './review-registry.js';
+import { isReviewSession } from './review-registry.js';
 import {
   createReviewLog,
   diffEntries,
@@ -23,6 +20,7 @@ import {
   isEmptyDiff,
   summarizeDiff,
 } from './review-log.js';
+import { completeReview, loadReviewState, recordTurn, reviewStatus } from './review-state.js';
 
 const MEMORY_ROUTING = `Memory has TWO distinct stores:
 - target='user': who the user is — profile, preferences, expectations.
@@ -109,12 +107,14 @@ async function developerMessage(text) {
 
 export function reviewNoticeText(entry, mode = 'on') {
   const diff = { memory: entry?.memory, user: entry?.user };
+  if (entry?.key !== undefined) diff.key = entry.key;
   if (isEmptyDiff(diff)) return '🧠 记忆回顾完成，没有需要保存的内容';
   const summary = entry?.summary || summarizeDiff(diff);
   const base = `🧠 记忆已更新 · ${summary}（详情见左侧栏「记忆」面板）`;
   if (mode !== 'verbose') return base;
   const lines = [];
-  for (const key of ['memory', 'user']) {
+  for (const key of ['memory', 'user', 'key']) {
+    if (diff[key] === undefined) continue;
     for (const line of diffPreview(diff[key])) {
       if (lines.length >= 3) break;
       lines.push(line);
@@ -144,185 +144,119 @@ export async function notifyReview(agent, entry, mode = 'on') {
   }
 }
 
-function readState(file) {
-  try {
-    const raw = fs.readFileSync(file, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object' && parsed.sessions && typeof parsed.sessions === 'object') {
-      return { sessions: parsed.sessions };
+/** 读取 store 里参与快照的三轨；任何一轨读失败都退化成空数组。 */
+export function snapshotStores(store) {
+  const out = { memory: [], user: [], key: [] };
+  const targets = Array.isArray(store?.targets) ? store.targets : ['memory', 'user'];
+  for (const target of ['memory', 'user', 'key']) {
+    if (!targets.includes(target)) continue;
+    try {
+      out[target] = store.load(target) ?? [];
+    } catch {
+      out[target] = [];
     }
-  } catch {
-    /* 文件不存在或坏 JSON：当成空状态 */
   }
-  return { sessions: {} };
+  return out;
 }
 
-function writeState(file, state) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-  fs.renameSync(tmp, file);
+/**
+ * 结算一次回顾（给 `memory_review_status complete` 调用）。
+ *
+ * 签名按任务书：finishReview(sessionId, store, reviewLog, noticeMode)。
+ * options.before / startedAt 由调度器在到点时捕获；拿不到就按「窗口内没有变化」
+ * 处理。仍然清零计数、写账本，并在 noticeMode 允许时通知主会话。
+ */
+export function finishReview(sessionId, store, reviewLog, noticeMode = 'on', options = {}) {
+  const id = typeof sessionId === 'string' && sessionId ? sessionId : 'unknown';
+  const after = snapshotStores(store);
+  const before = options.before ?? after;
+  const memory = diffEntries(before.memory, after.memory);
+  const user = diffEntries(before.user, after.user);
+  const hasKey = Array.isArray(store?.targets) && store.targets.includes('key');
+  const key = hasKey ? diffEntries(before.key ?? [], after.key ?? []) : undefined;
+  const diff = key === undefined ? { memory, user } : { memory, user, key };
+  const summary = summarizeDiff(diff);
+  const entry = reviewLog?.append
+    ? reviewLog.append({
+        channel: 'review',
+        session_id: id,
+        started_at: options.startedAt ?? Date.now(),
+        finished_at: Date.now(),
+        ...diff,
+        summary,
+      })
+    : undefined;
+  if (noticeMode !== 'off' && options.agent) {
+    void notifyReview(options.agent, entry ?? { ...diff, summary }, noticeMode);
+  }
+  if (store?.dir) completeReview(store.dir, loadReviewState(store.dir));
+  return { sessionId: id, summary, entry };
+}
+
+function resolveAgent(ctx, sessionId) {
+  try {
+    return typeof ctx?.get === 'function' ? ctx.get('agents')?.get?.(sessionId) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function createNudgeScheduler({ ctx, store, config = {} }) {
   const dir = config.dir ?? store?.dir;
   if (!dir) throw new Error('nudge scheduler needs a memory directory');
 
-  const stateFile = config.stateFile ?? path.join(dir, 'nudge-state.json');
-  const interval = Math.max(1, Number(config.nudgeInterval ?? 10) || 10);
-  const provider = config.provider ?? 'fork';
-  const scope = {
-    memory: config.memoryEnabled !== false,
-    skills: config.skillsEnabled !== false,
-  };
-  const state = readState(stateFile);
-  const reviewing = new Set(); // review 子会话 id（它们的 turn/end 不计数）
-  const controller = new AbortController();
+  const interval = Math.max(1, Number(config.reviewInterval ?? config.nudgeInterval ?? 10) || 10);
+  const reviewMode = config.reviewMode === 'auto' ? 'auto' : 'suggest';
   const noticeMode = config.noticeMode ?? 'on';
-  const reviewLog = config.reviewLog ?? createReviewLog(store?.dir ?? dir);
+  const reviewLog = config.reviewLog ?? createReviewLog(dir);
+  const pendingSnapshots = new Map(); // sessionId -> { before, startedAt }
   let disposed = false;
-  let warnedUnavailable = false;
 
-  function snapshotStores() {
-    const out = { memory: [], user: [] };
-    if (store && typeof store.load === 'function') {
-      for (const target of ['memory', 'user']) {
-        try {
-          out[target] = store.load(target) ?? [];
-        } catch {
-          out[target] = [];
-        }
-      }
-    }
-    return out;
+  function capture(sessionId) {
+    if (pendingSnapshots.has(sessionId)) return;
+    pendingSnapshots.set(sessionId, { before: snapshotStores(store), startedAt: Date.now() });
   }
 
-  function finishReview({ parent, session, childId, before, startedAt }) {
-    try {
-      const after = snapshotStores();
-      const memory = diffEntries(before.memory, after.memory);
-      const user = diffEntries(before.user, after.user);
-      const summary = summarizeDiff({ memory, user });
-      const entry = reviewLog.record({
-        channel: 'review',
-        session_id: session?.id,
-        child_id: childId,
-        started_at: startedAt,
-        finished_at: Date.now(),
-        memory,
-        user,
-        summary,
-      });
-      if (noticeMode === 'off') return;
-      let agents;
-      try {
-        agents = typeof ctx.get === 'function' ? ctx.get('agents') : undefined;
-      } catch {
-        agents = undefined;
-      }
-      const agent = agents?.get?.(session?.id) ?? parent;
-      if (!agent) {
-        warn('main session agent is gone; memory review notice was not delivered');
-        return;
-      }
-      void notifyReview(agent, entry, noticeMode);
-    } catch (error) {
-      warn('failed to record background review', error);
-    }
-  }
-
-  const prompt =
-    typeof config.prompt === 'string' && config.prompt ? config.prompt : reviewPrompt({ ...scope, skillsEnabled: scope.skills });
-
-  const persist = () => {
-    try {
-      writeState(stateFile, state);
-    } catch (error) {
-      warn(`failed to persist ${stateFile}`, error);
-    }
-  };
-
-  function launchReview(session, entry) {
-    // cordis 对未 inject 的服务直接抛错，只能走 ctx.get()。
-    const subagents = typeof ctx.get === 'function' ? ctx.get('subagents') : undefined;
-    const agents = typeof ctx.get === 'function' ? ctx.get('agents') : undefined;
-    if (!subagents || typeof subagents.startActivation !== 'function' || !agents || typeof agents.get !== 'function') {
-      if (!warnedUnavailable) {
-        warnedUnavailable = true;
-        warn('subagent delegation is unavailable; background review is disabled for this host');
-      }
-      persist(); // 计数继续累加，等宿主补齐能力后仍按节奏触发
-      return;
-    }
-    const parent = agents.get(session.id);
-    if (!parent) {
-      persist(); // 会话已回收：保留计数，等下一轮
-      return;
-    }
-
-    const before = snapshotStores();
-    const startedAt = Date.now();
-    const activation = subagents.startActivation({
-      provider,
-      label: 'memory-review',
-      request: { prompt: [{ type: 'text', text: prompt }], parent },
-      signal: controller.signal,
-      delivery: 'caller',
-    });
-    Promise.resolve(activation).then(
-      ({ childId, result }) => {
-        if (typeof childId === 'string') {
-          reviewing.add(childId);
-          markReviewSession(childId); // memory 工具据此把破坏性写入转成 stage
-        }
-        entry.turns = 0;
-        entry.nudged = (entry.nudged ?? 0) + 1;
-        entry.lastAt = new Date().toISOString();
-        persist();
-        Promise.resolve(result)
-          .then(
-            () => {},
-            (error) => warn('background review failed', error),
-          )
-          .then(() => {
-            if (typeof childId === 'string') {
-              reviewing.delete(childId);
-              clearReviewSession(childId);
-            }
-            finishReview({ parent, session, childId, before, startedAt });
-          });
-      },
-      (error) => {
-        warn('failed to start background review', error);
-      },
-    );
-  }
-
-  const onSessionEvent = (session, event) => {
+  function onSessionEvent(session, event) {
     try {
       if (disposed) return;
       if (!event || event.type !== 'turn/end') return;
       const id = session?.id;
       if (typeof id !== 'string' || !id) return;
-      if (reviewing.has(id)) return; // 子会话不计数
-
-      const entry = state.sessions[id] ?? { turns: 0, nudged: 0, lastAt: null };
-      entry.turns = (entry.turns ?? 0) + 1;
-      state.sessions[id] = entry;
-
-      if (entry.turns < interval) {
-        persist();
-        return;
-      }
-      launchReview(session, entry);
+      if (isReviewSession(id)) return; // review / curator 子会话不计数
+      const next = recordTurn(dir, loadReviewState(dir), interval);
+      if (reviewStatus(next, interval).due) capture(id);
     } catch (error) {
       warn('nudge scheduler failed', error);
     }
-  };
+  }
 
-  const off = ctx.on('session/event', onSessionEvent);
+  const off = typeof ctx?.on === 'function' ? ctx.on('session/event', onSessionEvent) : undefined;
 
   return {
+    interval,
+    reviewMode,
+    status() {
+      return reviewStatus(loadReviewState(dir), interval);
+    },
+    /** 调度器内部结算：取出到点时捕获的 before，顺便解析主会话 agent。 */
+    finishReview(sessionId) {
+      const id = typeof sessionId === 'string' && sessionId ? sessionId : 'unknown';
+      const captured = pendingSnapshots.get(id);
+      try {
+        const result = finishReview(id, store, reviewLog, noticeMode, {
+          before: captured?.before,
+          startedAt: captured?.startedAt,
+          agent: resolveAgent(ctx, id),
+        });
+        pendingSnapshots.delete(id);
+        return result;
+      } catch (error) {
+        warn('failed to finish memory review', error);
+        pendingSnapshots.delete(id);
+        return { sessionId: id, summary: '', entry: undefined };
+      }
+    },
     dispose() {
       disposed = true;
       try {
@@ -330,11 +264,7 @@ export function createNudgeScheduler({ ctx, store, config = {} }) {
       } catch {
         /* ignore */
       }
-      try {
-        controller.abort();
-      } catch {
-        /* ignore */
-      }
+      pendingSnapshots.clear();
     },
   };
 }

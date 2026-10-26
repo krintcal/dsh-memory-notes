@@ -18,10 +18,16 @@ function fakeCtx(services) {
   const disposers = [];
   const ctx = {
     tools: { register: (def) => tools.push(def) },
-    systemPrompt: { section: (def) => sections.push(def) },
+    systemPrompt: {
+      section: (def) => sections.push(def),
+      context: (def) => sections.push(def),
+    },
     on: (event, handler) => {
       listeners.push({ event, handler });
-      const dispose = () => {};
+      const dispose = () => {
+        const index = listeners.findIndex((item) => item.handler === handler);
+        if (index >= 0) listeners.splice(index, 1);
+      };
       disposers.push(dispose);
       return dispose;
     },
@@ -58,15 +64,20 @@ function approvalStub(outcome, { policy } = {}) {
 
 const approvalExec = { session: { id: 'main-session' }, agent: { session: { id: 'main-session' } } };
 
-test('apply 注册 memory 工具与 order 9000 的 memory 提示词段', () => {
+test('apply 注册 memory 工具与 order 9000 的实时 context', () => {
   const { tool, section } = setup();
   assert.equal(tool.name, 'memory');
-  assert.deepEqual(tool.parameters.properties.target.enum, ['memory', 'user']);
+  assert.deepEqual(tool.parameters.properties.target.enum, ['memory', 'user', 'key', 'project', 'daily']);
   assert.ok(Array.isArray(tool.parameters.required));
   assert.equal(typeof tool.output.render, 'function');
-  assert.equal(section.name, 'memory');
+  assert.equal(section.name, 'memory:snapshot');
   assert.equal(section.order, 9000);
   assert.equal(typeof section.text, 'function');
+});
+
+test('layeredTargets:false：target enum 退回 memory/user', () => {
+  const { tool } = setup({ layeredTargets: false });
+  assert.deepEqual(tool.parameters.properties.target.enum, ['memory', 'user']);
 });
 
 test('happy path：add 落盘且结果不回显条目内容', () => {
@@ -129,19 +140,20 @@ test('既无 action 也无 operations 时返回 success:false', () => {
   assert.match(res.error, /action.*operations/);
 });
 
-test('冻结快照：同会话不变，换会话才看到新条目', () => {
+test('实时快照：同一份数据逐字节稳定，写入下一轮即可见', () => {
   const { tool, section } = setup();
-  const a = { scope: { id: 'session-a' } };
-  const before = section.text(a);
+  const before = section.text({ scope: { id: 'session-a' } });
   assert.equal(typeof before, 'string');
+  assert.match(before, /runtime context message/);
+  assert.match(before, /每回合收尾/);
+  // 数据没变 → 文本必须逐字节一致（否则宿主会反复 append）
+  assert.equal(section.text({ scope: { id: 'session-a' } }), before);
+  assert.equal(section.text({ scope: { id: 'session-b' } }), before);
 
   tool.execute({ target: 'memory', action: 'add', content: 'fresh note' }, {});
-  assert.equal(section.text(a), before, '同一会话应冻结');
-  assert.doesNotMatch(before, /fresh note/);
-
-  const other = section.text({ scope: { id: 'session-b' } });
-  assert.match(other, /fresh note/);
-  assert.match(other, /Persistent memory loaded at session start/);
+  const after = section.text({ scope: { id: 'session-a' } });
+  assert.notEqual(after, before);
+  assert.match(after, /fresh note/);
 });
 
 test('store 不可读时 text 返回字符串而不是抛错', () => {
@@ -188,14 +200,18 @@ test('curator turn/end 接线：turn/end 才触发，其他事件不写盘', asy
   const dir = freshDir();
   const skillsDir = path.join(dir, 'skills');
   const { listeners } = setup({ dir, skillsDir });
-  const turnEnd = listeners.find((l) => l.event === 'session/event');
+  const emit = (event) => {
+    for (const listener of listeners.filter((l) => l.event === 'session/event')) {
+      listener.handler({}, event);
+    }
+  };
 
   // 非 turn/end 事件不产生任何状态文件
-  turnEnd.handler({}, { type: 'assistant/chunk' });
+  emit({ type: 'assistant/chunk' });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fs.existsSync(path.join(dir, 'curator-state.json')), false);
 
-  turnEnd.handler({}, { type: 'turn/end' });
+  emit({ type: 'turn/end' });
   // curator 被推到下一拍执行，避免卡住回合收尾
   await new Promise((resolve) => setImmediate(resolve));
   const state = JSON.parse(fs.readFileSync(path.join(dir, 'curator-state.json'), 'utf8'));
@@ -429,4 +445,60 @@ test('batch 含破坏性操作也要审批，reason 说明是批量', async () =
   assert.equal(res.success, true, JSON.stringify(res));
   assert.equal(stub.calls.length, 1);
   assert.match(stub.calls[0].reason, /批量修改记忆（memory）：2 项/);
+});
+
+/* -------------------------- 0.7.0：建议队列与五轨 -------------------------- */
+
+test("suggest：memory/user/key 入队且幂等，project/daily 拒绝", () => {
+  const { dir, tool } = setup();
+  const first = tool.execute({ target: 'memory', action: 'suggest', content: 'pnpm only after sync' }, {});
+  assert.equal(first.success, true, JSON.stringify(first));
+  assert.equal(first.staged, true);
+  assert.match(first.pending_id, /^[a-z0-9]+$/);
+  assert.match(first.message, /建议队列/);
+
+  const again = tool.execute({ target: 'memory', action: 'suggest', content: 'pnpm only after sync' }, {});
+  assert.equal(again.pending_id, first.pending_id, '相同内容幂等');
+
+  const file = path.join(dir, 'SUGGESTIONS.jsonl');
+  assert.match(fs.readFileSync(file, 'utf8'), /pnpm only after sync/);
+
+  for (const target of ['project', 'daily']) {
+    const res = tool.execute({ target, action: 'suggest', content: 'nope' }, {});
+    assert.equal(res.success, false);
+    assert.match(res.error, /only supports target/);
+  }
+});
+
+test("suggest：缺 content / 缺 target 都返回 success:false", () => {
+  const { tool } = setup();
+  assert.equal(tool.execute({ target: 'memory', action: 'suggest' }, {}).success, false);
+  const missing = tool.execute({ action: 'suggest', content: 'x' }, {});
+  assert.equal(missing.success, false);
+  assert.match(missing.error, /Missing required target/);
+});
+
+test('五轨写入：key/project/daily 走同一套 add/patch/remove 语义', () => {
+  const { dir, tool } = setup({ projectLogCharLimit: 200, dailyLogCharLimit: 200 });
+  const key = tool.execute({ target: 'key', action: 'add', content: 'uses pnpm [branch:main]' }, {});
+  assert.equal(key.success, true);
+  assert.equal(key.target, 'key');
+  assert.match(key.usage, /chars$/);
+
+  const patched = tool.execute({ target: 'project', action: 'add', content: 'step one' }, {});
+  assert.equal(patched.success, true);
+  tool.execute({ target: 'project', action: 'patch', old_text: 'one', content: 'two' }, {});
+
+  const daily = tool.execute({ target: 'daily', action: 'add', content: 'today summary' }, {});
+  assert.equal(daily.success, true);
+
+  const projectDirs = fs.readdirSync(path.join(dir, 'projects'));
+  assert.ok(projectDirs.length >= 1, '应创建 projects/<hash> 目录');
+  const projectFile = path.join(dir, 'projects', projectDirs[0], 'PROJECT.md');
+  assert.match(fs.readFileSync(projectFile, 'utf8'), /step two/);
+  const dailyFiles = fs.readdirSync(path.join(dir, 'daily'));
+  assert.equal(dailyFiles.length, 1);
+  assert.match(fs.readFileSync(path.join(dir, 'daily', dailyFiles[0]), 'utf8'), /today summary/);
+  const keyFile = path.join(dir, 'projects', projectDirs[0], 'KEY.md');
+  assert.match(fs.readFileSync(keyFile, 'utf8'), /\[branch:main\]/);
 });

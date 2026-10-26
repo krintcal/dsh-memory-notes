@@ -7,6 +7,13 @@ import path from 'node:path';
 import { MemoryStore } from '../src/store.js';
 import { createPendingStore, PENDING_ID_RE } from '../src/pending.js';
 import { createWebApi, isLoopbackRequest, buildRoutes, registerWebPanel } from '../src/web.js';
+import {
+  count as countSuggestions,
+  drop as dropSuggestion,
+  enqueue,
+  list as listSuggestions,
+  take as takeSuggestion,
+} from '../src/suggestions.js';
 
 function fixture(opts = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-web-'));
@@ -249,13 +256,108 @@ test('registerWebPanel 通过 ctx.effect 注册路由，dispose 时调用每个 
 
   registerWebPanel(ctx, { store, pending });
   assert.match(String(effectLabel), /web routes/);
-  assert.equal(registered.length, 3);
+  assert.equal(registered.length, 4);
   assert.equal(disposed.length, 0);
 
   cleanup();
   assert.deepEqual(disposed.sort(), [
     '/api/dsh-memory-notes/pending',
     '/api/dsh-memory-notes/state',
+    '/api/dsh-memory-notes/suggestions',
     '/api/dsh-memory-notes/write',
   ]);
+});
+
+function suggestionFixture() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-web-suggestions-'));
+  const store = new MemoryStore({ dir });
+  const pending = createPendingStore(path.join(dir, 'pending'));
+  const suggestions = {
+    enqueue: (record) => enqueue(dir, record),
+    list: () => listSuggestions(dir),
+    take: (id) => takeSuggestion(dir, id),
+    drop: (id) => dropSuggestion(dir, id),
+    count: () => countSuggestions(dir),
+  };
+  const api = createWebApi({
+    store,
+    pending,
+    suggestions,
+    review: () => ({ due: true, turns_since: 3, interval: 10, mode: 'suggest' }),
+  });
+  return { dir, store, pending, suggestions, api };
+}
+
+test('state 带 suggestions（最近 20）与 review 状态', () => {
+  const { api, dir } = suggestionFixture();
+  enqueue(dir, { target: 'memory', text: 'queued fact', source: 'review' });
+  const state = api.state();
+  assert.equal(state.ok, true);
+  assert.equal(state.suggestions.length, 1);
+  assert.equal(state.suggestions[0].text, 'queued fact');
+  assert.equal(state.suggestions[0].target, 'memory');
+  assert.deepEqual(state.review, { due: true, turns_since: 3, interval: 10, mode: 'suggest' });
+});
+
+test('suggestions accept：写入对应 store 后删除建议', () => {
+  const { api, store, dir } = suggestionFixture();
+  const { record } = enqueue(dir, { target: 'user', text: 'prefers concise replies', source: 'review' });
+  const res = api.suggestionsDecision({ id: record.id, decision: 'accept' });
+  assert.equal(res.ok, true);
+  assert.equal(res.accepted_suggestion, record.id);
+  assert.deepEqual(store.entries('user'), ['prefers concise replies']);
+  assert.equal(res.state.suggestions.length, 0);
+  assert.equal(countSuggestions(dir), 0);
+});
+
+test('suggestions discard：只删建议，不写存储', () => {
+  const { api, store, dir } = suggestionFixture();
+  const { record } = enqueue(dir, { target: 'memory', text: 'do not keep', source: 'review' });
+  const res = api.suggestionsDecision({ id: record.id, decision: 'discard' });
+  assert.equal(res.ok, true);
+  assert.equal(res.discarded_suggestion, record.id);
+  assert.deepEqual(store.entries('memory'), []);
+  assert.equal(countSuggestions(dir), 0);
+});
+
+test('suggestions accept 失败（内容含 §）时保留建议', () => {
+  const { api, store, dir } = suggestionFixture();
+  const { record } = enqueue(dir, { target: 'memory', text: 'bad\n§\nentry', source: 'review' });
+  const res = api.suggestionsDecision({ id: record.id, decision: 'accept' });
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /§/);
+  assert.deepEqual(store.entries('memory'), []);
+  assert.equal(countSuggestions(dir), 1);
+});
+
+test('suggestions 未知 id / 非法 decision 返回 ok:false', () => {
+  const { api, dir } = suggestionFixture();
+  assert.equal(api.suggestionsDecision({ id: 'missing', decision: 'accept' }).ok, false);
+  const { record } = enqueue(dir, { target: 'memory', text: 'x', source: 'review' });
+  assert.equal(api.suggestionsDecision({ id: record.id, decision: 'maybe' }).ok, false);
+  assert.equal(countSuggestions(dir), 1);
+});
+
+test('layered 记忆：state 暴露全部五轨（key/project/daily）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-web-layered-'));
+  const store = new MemoryStore({
+    dir,
+    targets: ['memory', 'user', 'key', 'project', 'daily'],
+    files: {
+      key: path.join(dir, 'projects', 'abc123', 'KEY.md'),
+      project: path.join(dir, 'projects', 'abc123', 'PROJECT.md'),
+      daily: () => path.join(dir, 'daily', '2026-10-26.md'),
+    },
+  });
+  const pending = createPendingStore(path.join(dir, 'pending'));
+  const api = createWebApi({ store, pending });
+  store.add('key', 'key entry [branch:main]');
+  store.add('daily', 'daily entry');
+  store.add('project', 'project entry');
+
+  const state = api.state();
+  assert.deepEqual(Object.keys(state.targets).sort(), ['daily', 'key', 'memory', 'project', 'user']);
+  assert.deepEqual(state.targets.key.entries, ['key entry [branch:main]']);
+  assert.deepEqual(state.targets.daily.entries, ['daily entry']);
+  assert.deepEqual(state.targets.project.entries, ['project entry']);
 });

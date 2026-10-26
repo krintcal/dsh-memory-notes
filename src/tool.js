@@ -27,9 +27,12 @@ export const REPLACE_REMOVED =
   "'replace' is not available; use 'patch'. old_text is the exact span to change and content is its new text; " +
   'the rest of the entry is kept. To rewrite a whole entry, set old_text to the whole entry. Nothing was written.';
 
-const DESCRIPTION = `Save durable facts to persistent memory that survive across sessions. Two plain-text stores:
+const DESCRIPTION = `Save durable facts to persistent memory that survive across sessions. Layered plain-text stores:
 - target 'user': who the user is — profile, preferences, expectations.
 - target 'memory': your own working notes — environment facts, tool quirks, project conventions, paths.
+- target 'key': short branch-scoped project facts; append [branch:main,release] to scope an entry to branches.
+- target 'project': this project's progress log (one entry per turn; skip if nothing happened).
+- target 'daily': today's running summary (one entry per day; patch it as the day goes on).
 
 **WHEN**: you learn a durable fact, correct a stale entry, or the user asks you to remember something.
 **IF FULL**: the limit is checked on the final state only. Combine removes and patches with the new entry in ONE
@@ -42,74 +45,87 @@ procedures belong in a skill (skill_manage).
 
 Patch edits a span inside one entry and keeps the rest; remove deletes a whole entry. Destructive edits (patch /
 remove) are never applied blind by a background review: they are proposed with 'stage' and the main session applies
-them via 'apply_pending' after 'list_pending'.`;
+them via 'apply_pending' after 'list_pending'.
 
-const PARAMETERS = {
-  type: 'object',
-  properties: {
-    target: {
-      type: 'string',
-      enum: ['memory', 'user'],
-      description:
-        "'user' = who the user is (profile, preferences, expectations); 'memory' = your own notes (environment, " +
-        'tool quirks, conventions). One fact goes to ONE store, never both.',
-    },
-    action: {
-      type: 'string',
-      enum: ['add', 'patch', 'remove', 'stage', 'list_pending', 'apply_pending', 'discard_pending'],
-      description:
-        "'add' saves a new entry; 'patch' rewrites a span inside an existing entry; 'remove' deletes an entry; " +
-        "'stage' defers a destructive write for approval; 'list_pending' / 'apply_pending' / 'discard_pending' " +
-        'manage the pending queue (DSH has no /memory CLI).',
-    },
-    content: {
-      type: 'string',
-      description:
-        "Required for 'add' and 'patch'. For 'add', the new entry. For 'patch', the text that replaces old_text; " +
-        "the rest of the entry is kept. Alias: 'new_text'.",
-    },
-    old_text: {
-      type: 'string',
-      description:
-        "REQUIRED for 'patch' and 'remove': text from one entry. 'patch' replaces exactly this span (it must occur " +
-        "once in the entry); 'remove' deletes the whole entry. Omit for 'add'. For 'stage' with op replace/remove, " +
-        'this identifies the entry.',
-    },
-    new_text: { type: 'string', description: "Alias of 'content'." },
-    op: {
-      type: 'string',
-      enum: ['patch', 'remove', 'replace'],
-      description: "For action 'stage': the destructive op to defer (replace is legacy replay only).",
-    },
-    pending_id: {
-      type: 'string',
-      description: "For 'apply_pending' / 'discard_pending': the id returned by 'stage' or 'list_pending'.",
-    },
-    operations: {
-      type: 'array',
-      description:
-        'Atomic batch; the char limit is checked only on the final result. Use ONE batch to shrink (remove / patch) ' +
-        'and add in the same call.',
-      items: {
-        type: 'object',
-        properties: {
-          action: { type: 'string', enum: WIRE_ACTIONS },
-          content: { type: 'string' },
-          new_text: { type: 'string' },
-          old_text: { type: 'string' },
+In review mode, 'suggest' queues a memory/user/key entry for the user to accept in the left sidebar instead of
+writing it directly; project/daily are always written directly.`;
+
+function parametersFor(targets) {
+  const list = Array.isArray(targets) && targets.length ? targets : ['memory', 'user'];
+  return {
+    type: 'object',
+    properties: {
+      target: {
+        type: 'string',
+        enum: [...list],
+        description:
+          `One of: ${list.join(', ')}. 'user' = who the user is; 'memory' = your own notes; 'key' = branch-scoped ` +
+          "project facts; 'project' = project progress log; 'daily' = today's summary. One fact goes to ONE store.",
+      },
+      action: {
+        type: 'string',
+        enum: ['add', 'patch', 'remove', 'suggest', 'stage', 'list_pending', 'apply_pending', 'discard_pending'],
+        description:
+          "'add' saves a new entry; 'patch' rewrites a span inside an existing entry; 'remove' deletes an entry; " +
+          "'suggest' queues a memory/user/key entry for user approval; 'stage' defers a destructive write for " +
+          "approval; 'list_pending' / 'apply_pending' / 'discard_pending' manage the pending queue (DSH has no " +
+          '/memory CLI).',
+      },
+      content: {
+        type: 'string',
+        description:
+          "Required for 'add', 'patch' and 'suggest'. For 'add', the new entry. For 'patch', the text that replaces " +
+          "old_text; the rest of the entry is kept. For 'suggest', the proposed entry text. Alias: 'new_text'.",
+      },
+      old_text: {
+        type: 'string',
+        description:
+          "REQUIRED for 'patch' and 'remove': text from one entry. 'patch' replaces exactly this span (it must occur " +
+          "once in the entry); 'remove' deletes the whole entry. Omit for 'add'. For 'stage' with op replace/remove, " +
+          'this identifies the entry.',
+      },
+      new_text: { type: 'string', description: "Alias of 'content'." },
+      op: {
+        type: 'string',
+        enum: ['patch', 'remove', 'replace'],
+        description: "For action 'stage': the destructive op to defer (replace is legacy replay only).",
+      },
+      pending_id: {
+        type: 'string',
+        description: "For 'apply_pending' / 'discard_pending': the id returned by 'stage' or 'list_pending'.",
+      },
+      operations: {
+        type: 'array',
+        description:
+          'Atomic batch; the char limit is checked only on the final result. Use ONE batch to shrink (remove / patch) ' +
+          'and add in the same call.',
+        items: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: WIRE_ACTIONS },
+            content: { type: 'string' },
+            new_text: { type: 'string' },
+            old_text: { type: 'string' },
+          },
+          required: ['action'],
+          additionalProperties: false,
         },
-        required: ['action'],
-        additionalProperties: false,
       },
     },
-  },
-  required: [],
-  additionalProperties: false,
-};
+    required: [],
+    additionalProperties: false,
+  };
+}
 
-const MISSING_TARGET =
-  "Missing required target. Retry with target='memory' or target='user' at the top level. For a batch, remove " +
-  'target from every operation; use separate calls for different stores. Nothing was written or staged.';
+function missingTargetMessage(targets) {
+  const list = Array.isArray(targets) && targets.length ? targets : ['memory', 'user'];
+  return (
+    `Missing required target. Retry with ${list.map((target) => `target='${target}'`).join(' / ')} at the top ` +
+    'level. For a batch, remove target from every operation; use separate calls for different stores. Nothing ' +
+    'was written or staged.'
+  );
+}
+
 
 function textOf(input) {
   const value = input?.content ?? input?.new_text;
@@ -122,7 +138,9 @@ function failureResult(err) {
 }
 
 function checkTarget(store, target) {
-  if (target === undefined || target === null) throw new MemoryError(MISSING_TARGET, { success: false });
+  if (target === undefined || target === null) {
+    throw new MemoryError(missingTargetMessage(store?.targets), { success: false });
+  }
   store.assertTarget(target);
 }
 
@@ -172,6 +190,7 @@ export function toolDefinition({
   limits,
   pendingDir,
   pending: sharedPending,
+  suggestions,
   approval,
   getAgent,
   config = {},
@@ -180,6 +199,8 @@ export function toolDefinition({
   const pending = sharedPending ?? createPendingStore(pendingDir);
   const approvalMode = config.approvalMode ?? 'ask';
   const approvalConfigured = approval !== undefined;
+  const targets = Array.isArray(store.targets) && store.targets.length ? store.targets : ['memory', 'user'];
+  const parameters = parametersFor(targets);
 
   function resolveApproval() {
     try {
@@ -415,13 +436,52 @@ export function toolDefinition({
       }
       return store.remove(target, oldText);
     }
-    return { success: false, error: `Unknown action '${action}'. Use: add, patch, remove` };
+    return { success: false, error: `Unknown action '${action}'. Use: add, patch, remove, suggest` };
+  }
+
+  /** reviewMode:'suggest' 的写入：只入队 memory/user/key，project/daily 直写。 */
+  function suggestAction(input, exec) {
+    const target = input.target;
+    try {
+      checkTarget(store, target);
+    } catch (err) {
+      return failureResult(err);
+    }
+    if (!['memory', 'user', 'key'].includes(target)) {
+      return {
+        success: false,
+        error:
+          "action 'suggest' only supports target 'memory', 'user' or 'key'; write project/daily directly with " +
+          "action='add'.",
+      };
+    }
+    const content = textOf(input);
+    if (typeof content !== 'string' || !content.trim()) {
+      return { success: false, error: "action 'suggest' requires content — the proposed entry text." };
+    }
+    if (!suggestions || typeof suggestions.enqueue !== 'function') {
+      return { success: false, error: 'suggestion queue is unavailable (no suggestions directory configured)' };
+    }
+    const source = isReviewSession(sessionIdFromExec(exec)) ? 'review' : 'tool';
+    try {
+      const queued = suggestions.enqueue({ target, text: content, source });
+      const record = queued?.record ?? queued;
+      return {
+        success: true,
+        staged: true,
+        pending_id: record?.id,
+        target,
+        message: '已写入建议队列，等待在左侧栏「记忆」面板确认。',
+      };
+    } catch (err) {
+      return failureResult(err);
+    }
   }
 
   return {
     name: 'memory',
     description: DESCRIPTION,
-    parameters: PARAMETERS,
+    parameters,
     output: {
       schema: { type: 'object' },
       render: (_args, value) => [
@@ -432,6 +492,7 @@ export function toolDefinition({
       const input = args ?? {};
       try {
         const action = input.action;
+        if (action === 'suggest') return suggestAction(input, exec);
         if (action === 'list_pending' || action === 'apply_pending' || action === 'discard_pending') {
           return applyPending(input);
         }
@@ -443,12 +504,12 @@ export function toolDefinition({
           return {
             success: false,
             error:
-              "Missing required parameter: provide 'action' (add/patch/remove) or 'operations' (batch list). " +
-              'Got neither.',
+              "Missing required parameter: provide 'action' (add/patch/remove/suggest) or 'operations' (batch " +
+              'list). Got neither.',
           };
         }
         if (action && action !== 'add' && action !== 'patch' && action !== 'remove') {
-          return { success: false, error: `Unknown action '${action}'. Use: add, patch, remove` };
+          return { success: false, error: `Unknown action '${action}'. Use: add, patch, remove, suggest` };
         }
 
         const unattended = isReviewSession(sessionIdFromExec(exec));
