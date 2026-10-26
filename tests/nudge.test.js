@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { createNudgeScheduler } from '../src/nudge.js';
+import { createReviewLog } from '../src/review-log.js';
 
 /** 最小假宿主：只实现调度器用到的 ctx.on / ctx.get（services）。 */
 function makeCtx({ agent, startActivation } = {}) {
@@ -43,10 +44,11 @@ const turnEnd = (session) => [session, { type: 'turn/end' }];
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 function schedulerFor(dir, ctx, overrides = {}) {
+  const { store, ...rest } = overrides;
   return createNudgeScheduler({
     ctx,
-    store: { dir },
-    config: { dir, nudgeInterval: 10, provider: 'fork', ...overrides },
+    store: store ?? { dir },
+    config: { dir, nudgeInterval: 10, provider: 'fork', ...rest },
   });
 }
 
@@ -210,5 +212,138 @@ test('没有 subagents 服务时安静降级（不抛、不写坏状态）', asy
   await tick();
   const state = JSON.parse(fs.readFileSync(path.join(dir, 'nudge-state.json'), 'utf8'));
   assert.equal(state.sessions['session-g'].turns, 12, '降级时计数照常累加');
+  scheduler.dispose();
+});
+
+/* ------------------------- Phase 1：review 完成后的提示 ------------------------- */
+
+function memoryStoreStub(dir, initial = {}) {
+  const data = { memory: [...(initial.memory ?? [])], user: [...(initial.user ?? [])] };
+  return {
+    dir,
+    data,
+    load(target) {
+      return [...data[target]];
+    },
+  };
+}
+
+async function flush(times = 6) {
+  for (let i = 0; i < times; i += 1) await tick();
+}
+
+test('review 完成后 review-log 有记录（noticeMode: off 也不影响记录）', async () => {
+  const dir = tempDir();
+  const reviewLog = createReviewLog(dir);
+  const store = memoryStoreStub(dir, { memory: ['old note'] });
+  const session = { id: 'session-review-log' };
+  const injected = [];
+  const ctx = makeCtx({
+    agent: { id: 'session-review-log', inject: (message) => injected.push(message) },
+    startActivation: () => ({
+      childId: 'child-log',
+      result: Promise.resolve().then(() => {
+        store.data.memory = ['old note', 'new note'];
+      }),
+    }),
+  });
+  const scheduler = schedulerFor(dir, ctx, { store, reviewLog, noticeMode: 'off' });
+
+  for (let i = 0; i < 10; i += 1) ctx.emit(...turnEnd(session));
+  await flush();
+
+  assert.equal(reviewLog.count(), 1);
+  const entry = reviewLog.recent(1)[0];
+  assert.equal(entry.channel, 'review');
+  assert.equal(entry.session_id, 'session-review-log');
+  assert.equal(entry.child_id, 'child-log');
+  assert.deepEqual(entry.memory.added, ['new note']);
+  assert.match(entry.summary, /MEMORY \+1/);
+  assert.equal(injected.length, 0, 'off 档不 inject');
+  scheduler.dispose();
+});
+
+test("noticeMode: 'on' 注入一条 developer 消息，含「记忆已更新」", async () => {
+  const dir = tempDir();
+  const store = memoryStoreStub(dir, { memory: [] });
+  const injected = [];
+  const session = { id: 'session-on' };
+  const ctx = makeCtx({
+    agent: { id: 'session-on', inject: (message) => injected.push(message) },
+    startActivation: () => ({
+      childId: 'child-on',
+      result: Promise.resolve().then(() => {
+        store.data.memory = ['remember this'];
+      }),
+    }),
+  });
+  const scheduler = schedulerFor(dir, ctx, { store, reviewLog: createReviewLog(dir), noticeMode: 'on' });
+
+  for (let i = 0; i < 10; i += 1) ctx.emit(...turnEnd(session));
+  await flush();
+
+  assert.equal(injected.length, 1);
+  const message = injected[0];
+  assert.equal(message.role, 'developer');
+  assert.deepEqual(message.source, { kind: 'memory-review' });
+  assert.match(message.content[0].text, /记忆已更新/);
+  assert.match(message.content[0].text, /详情见左侧栏/);
+  scheduler.dispose();
+});
+
+test("noticeMode: 'verbose' 额外带最多 3 条变更预览", async () => {
+  const dir = tempDir();
+  const longText = `very long memory entry ${'x'.repeat(120)}`;
+  const store = memoryStoreStub(dir, { memory: [] });
+  const injected = [];
+  const session = { id: 'session-verbose' };
+  const ctx = makeCtx({
+    agent: { id: 'session-verbose', inject: (message) => injected.push(message) },
+    startActivation: () => ({
+      childId: 'child-verbose',
+      result: Promise.resolve().then(() => {
+        store.data.memory = [longText, 'second', 'third', 'fourth'];
+      }),
+    }),
+  });
+  const scheduler = schedulerFor(dir, ctx, { store, reviewLog: createReviewLog(dir), noticeMode: 'verbose' });
+
+  for (let i = 0; i < 10; i += 1) ctx.emit(...turnEnd(session));
+  await flush();
+
+  assert.equal(injected.length, 1);
+  const text = injected[0].content[0].text;
+  assert.match(text, /\+ /, '新增条目要带 + 前缀');
+  assert.match(text, /very long memory entry/);
+  const previewLines = text.split('\n').slice(1);
+  assert.ok(previewLines.length <= 3, `最多 3 条预览，实际 ${previewLines.length}`);
+  scheduler.dispose();
+});
+
+test('inject 抛错不影响 review 完成与账本记录', async () => {
+  const dir = tempDir();
+  const reviewLog = createReviewLog(dir);
+  const store = memoryStoreStub(dir, { memory: [] });
+  const session = { id: 'session-inject-throw' };
+  const ctx = makeCtx({
+    agent: {
+      id: 'session-inject-throw',
+      inject: () => {
+        throw new Error('inject refused');
+      },
+    },
+    startActivation: () => ({
+      childId: 'child-throw',
+      result: Promise.resolve().then(() => {
+        store.data.memory = ['written'];
+      }),
+    }),
+  });
+  const scheduler = schedulerFor(dir, ctx, { store, reviewLog, noticeMode: 'on' });
+
+  for (let i = 0; i < 10; i += 1) ctx.emit(...turnEnd(session));
+  await flush();
+  assert.equal(reviewLog.count(), 1);
+  assert.deepEqual(reviewLog.recent(1)[0].memory.added, ['written']);
   scheduler.dispose();
 });

@@ -82,12 +82,28 @@ function targetView(store, target) {
   };
 }
 
-export function createWebApi({ store, pending }) {
+export function createWebApi({ store, pending, reviewLog, writeLog }) {
   const pendingEnabled = pending?.enabled === true;
 
   function pendingItems() {
     if (!pendingEnabled) return [];
     return pending.list().map(summarizePending);
+  }
+
+  function reviewItems() {
+    try {
+      return reviewLog?.recent?.(10) ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  function writeItems() {
+    try {
+      return writeLog?.recent?.(20) ?? [];
+    } catch {
+      return [];
+    }
   }
 
   return {
@@ -99,6 +115,8 @@ export function createWebApi({ store, pending }) {
           user: targetView(store, 'user'),
         },
         pending: pendingItems(),
+        reviews: reviewItems(),
+        writes: writeItems(),
       };
     },
 
@@ -108,6 +126,7 @@ export function createWebApi({ store, pending }) {
       const action = input.action;
       const content = typeof input.content === 'string' ? input.content : undefined;
       const oldText = typeof input.old_text === 'string' ? input.old_text : undefined;
+      store.lastSource = 'panel';
       try {
         store.assertTarget(target);
         let result;
@@ -155,6 +174,7 @@ export function createWebApi({ store, pending }) {
         };
       }
       try {
+        store.lastSource = 'panel';
         const result = applyRecord(store, loaded.record);
         const dropped = pending.drop(loaded.file);
         return {
@@ -236,9 +256,9 @@ export function buildRoutes(api) {
  * 把路由挂到 web 服务上。webServer 是可选服务（CLI 宿主没有），所以走
  * `ctx.inject` 等它出现；注册失败只记日志，绝不影响工具与提示词。
  */
-export function registerWebPanel(ctx, { store, pending }) {
+export function registerWebPanel(ctx, { store, pending, reviewLog, writeLog }) {
   if (typeof ctx?.inject !== 'function') return;
-  const api = createWebApi({ store, pending });
+  const api = createWebApi({ store, pending, reviewLog, writeLog });
   ctx.inject(['webServer'], (webCtx) => {
     try {
       const server = webCtx.webServer ?? webCtx.get?.('webServer');

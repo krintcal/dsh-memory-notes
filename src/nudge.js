@@ -16,6 +16,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { clearReviewSession, markReviewSession } from './review-registry.js';
+import {
+  createReviewLog,
+  diffEntries,
+  diffPreview,
+  isEmptyDiff,
+  summarizeDiff,
+} from './review-log.js';
 
 const MEMORY_ROUTING = `Memory has TWO distinct stores:
 - target='user': who the user is — profile, preferences, expectations.
@@ -24,7 +31,9 @@ One fact goes to ONE store, never both.`;
 
 const MEMORY_TASK = `Review the conversation above and consider saving to memory if appropriate. If something stands out, save
 it once, in the right store, using the memory tool with the matching target. Batch several changes into ONE
-'operations' call. If nothing is worth saving, just say 'Nothing to save.' and stop.`;
+'operations' call. If nothing is worth saving, just say 'Nothing to save.' and stop.
+Do not save task progress, conversation history, or completed work — look those up with session_search when the
+host provides it. Save only facts that stay true across sessions.`;
 
 const SKILL_TASK = `Review the conversation above and update the skill library. Be ACTIVE — most sessions produce at
 least one skill update, even if small.
@@ -79,6 +88,62 @@ function warn(message, error) {
   }
 }
 
+let warnedLlmImport = false;
+
+/** 优先用宿主的开发者消息构造函数；拿不到就回退普通对象（只 warn 一次）。 */
+async function developerMessage(text) {
+  try {
+    const mod = await import('@deepseek-ai/dsh-llm');
+    const create = mod?.createDeveloperMessage ?? mod?.default?.createDeveloperMessage;
+    if (typeof create === 'function') {
+      return create({ content: [{ type: 'text', text }], source: { kind: 'memory-review' } });
+    }
+  } catch (error) {
+    if (!warnedLlmImport) {
+      warnedLlmImport = true;
+      warn('@deepseek-ai/dsh-llm unavailable; using a plain developer message', error);
+    }
+  }
+  return { role: 'developer', content: [{ type: 'text', text }], source: { kind: 'memory-review' } };
+}
+
+export function reviewNoticeText(entry, mode = 'on') {
+  const diff = { memory: entry?.memory, user: entry?.user };
+  if (isEmptyDiff(diff)) return '🧠 记忆回顾完成，没有需要保存的内容';
+  const summary = entry?.summary || summarizeDiff(diff);
+  const base = `🧠 记忆已更新 · ${summary}（详情见左侧栏「记忆」面板）`;
+  if (mode !== 'verbose') return base;
+  const lines = [];
+  for (const key of ['memory', 'user']) {
+    for (const line of diffPreview(diff[key])) {
+      if (lines.length >= 3) break;
+      lines.push(line);
+    }
+    if (lines.length >= 3) break;
+  }
+  return lines.length ? `${base}\n${lines.join('\n')}` : base;
+}
+
+/** 通过 agent.inject 推一条开发者消息；绝不用 followup / steer，避免多跑一轮模型。 */
+export async function notifyReview(agent, entry, mode = 'on') {
+  if (!agent || typeof agent.inject !== 'function') {
+    warn('no main-session agent to receive the memory review notice; skipping inject');
+    return false;
+  }
+  const text = reviewNoticeText(entry, mode);
+  const message = await developerMessage(text);
+  try {
+    const result = agent.inject(message);
+    if (result && typeof result.catch === 'function') {
+      await result.catch((error) => warn('failed to inject memory review notice', error));
+    }
+    return true;
+  } catch (error) {
+    warn('failed to inject memory review notice', error);
+    return false;
+  }
+}
+
 function readState(file) {
   try {
     const raw = fs.readFileSync(file, 'utf8');
@@ -113,8 +178,58 @@ export function createNudgeScheduler({ ctx, store, config = {} }) {
   const state = readState(stateFile);
   const reviewing = new Set(); // review 子会话 id（它们的 turn/end 不计数）
   const controller = new AbortController();
+  const noticeMode = config.noticeMode ?? 'on';
+  const reviewLog = config.reviewLog ?? createReviewLog(store?.dir ?? dir);
   let disposed = false;
   let warnedUnavailable = false;
+
+  function snapshotStores() {
+    const out = { memory: [], user: [] };
+    if (store && typeof store.load === 'function') {
+      for (const target of ['memory', 'user']) {
+        try {
+          out[target] = store.load(target) ?? [];
+        } catch {
+          out[target] = [];
+        }
+      }
+    }
+    return out;
+  }
+
+  function finishReview({ parent, session, childId, before, startedAt }) {
+    try {
+      const after = snapshotStores();
+      const memory = diffEntries(before.memory, after.memory);
+      const user = diffEntries(before.user, after.user);
+      const summary = summarizeDiff({ memory, user });
+      const entry = reviewLog.record({
+        channel: 'review',
+        session_id: session?.id,
+        child_id: childId,
+        started_at: startedAt,
+        finished_at: Date.now(),
+        memory,
+        user,
+        summary,
+      });
+      if (noticeMode === 'off') return;
+      let agents;
+      try {
+        agents = typeof ctx.get === 'function' ? ctx.get('agents') : undefined;
+      } catch {
+        agents = undefined;
+      }
+      const agent = agents?.get?.(session?.id) ?? parent;
+      if (!agent) {
+        warn('main session agent is gone; memory review notice was not delivered');
+        return;
+      }
+      void notifyReview(agent, entry, noticeMode);
+    } catch (error) {
+      warn('failed to record background review', error);
+    }
+  }
 
   const prompt =
     typeof config.prompt === 'string' && config.prompt ? config.prompt : reviewPrompt({ ...scope, skillsEnabled: scope.skills });
@@ -145,6 +260,8 @@ export function createNudgeScheduler({ ctx, store, config = {} }) {
       return;
     }
 
+    const before = snapshotStores();
+    const startedAt = Date.now();
     const activation = subagents.startActivation({
       provider,
       label: 'memory-review',
@@ -163,12 +280,16 @@ export function createNudgeScheduler({ ctx, store, config = {} }) {
         entry.lastAt = new Date().toISOString();
         persist();
         Promise.resolve(result)
-          .catch((error) => warn('background review failed', error))
-          .finally(() => {
+          .then(
+            () => {},
+            (error) => warn('background review failed', error),
+          )
+          .then(() => {
             if (typeof childId === 'string') {
               reviewing.delete(childId);
               clearReviewSession(childId);
             }
+            finishReview({ parent, session, childId, before, startedAt });
           });
       },
       (error) => {

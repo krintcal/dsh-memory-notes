@@ -11,39 +11,52 @@ function freshDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'mem-plugin-'));
 }
 
-function fakeCtx() {
+function fakeCtx(services) {
   const tools = [];
   const sections = [];
   const listeners = [];
   const disposers = [];
+  const ctx = {
+    tools: { register: (def) => tools.push(def) },
+    systemPrompt: { section: (def) => sections.push(def) },
+    on: (event, handler) => {
+      listeners.push({ event, handler });
+      const dispose = () => {};
+      disposers.push(dispose);
+      return dispose;
+    },
+    // 真正执行回调，才能覆盖 index.js 里 curator 的 turn/end 接线。
+    effect: (run) => {
+      const dispose = run();
+      if (typeof dispose === 'function') disposers.push(dispose);
+    },
+  };
+  // 只有显式注入 services 才提供 ctx.get：老用例因此保持「没有审批服务」的直写语义。
+  if (services !== undefined) ctx.get = (name) => services[name];
+  return { tools, sections, listeners, ctx };
+}
+
+function setup(config = {}, services) {
+  const dir = config.dir ?? freshDir();
+  const { ctx, tools, sections, listeners } = fakeCtx(services);
+  apply(ctx, { dir, skillsDir: config.skillsDir ?? path.join(dir, 'skills'), ...config });
+  return { dir, tool: tools[0], tools, section: sections[0], listeners };
+}
+
+function approvalStub(outcome, { policy } = {}) {
+  const calls = [];
   return {
-    tools,
-    sections,
-    listeners,
-    ctx: {
-      tools: { register: (def) => tools.push(def) },
-      systemPrompt: { section: (def) => sections.push(def) },
-      on: (event, handler) => {
-        listeners.push({ event, handler });
-        const dispose = () => {};
-        disposers.push(dispose);
-        return dispose;
-      },
-      // 真正执行回调，才能覆盖 index.js 里 curator 的 turn/end 接线。
-      effect: (run) => {
-        const dispose = run();
-        if (typeof dispose === 'function') disposers.push(dispose);
-      },
+    calls,
+    effectivePolicy: policy === undefined ? undefined : () => policy,
+    request(spec) {
+      calls.push(spec);
+      if (outcome instanceof Error) return Promise.reject(outcome);
+      return Promise.resolve(outcome);
     },
   };
 }
 
-function setup(config = {}) {
-  const dir = config.dir ?? freshDir();
-  const { ctx, tools, sections, listeners } = fakeCtx();
-  apply(ctx, { dir, skillsDir: config.skillsDir ?? path.join(dir, 'skills'), ...config });
-  return { dir, tool: tools[0], tools, section: sections[0], listeners };
-}
+const approvalExec = { session: { id: 'main-session' }, agent: { session: { id: 'main-session' } } };
 
 test('apply 注册 memory 工具与 order 9000 的 memory 提示词段', () => {
   const { tool, section } = setup();
@@ -300,4 +313,120 @@ test('后台 review（unattended）的破坏性写入自动转 stage，add 仍�
   const direct = tool.execute({ target: 'memory', action: 'patch', old_text: 'changed fact', content: 'final' }, exec);
   assert.equal(direct.success, true);
   assert.match(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8'), /final/);
+});
+
+/* ------------------------- Phase 2：ctx.approval 审批 ------------------------- */
+
+test("approval 'allowed-once'：破坏性写入放行", async () => {
+  const stub = approvalStub('allowed-once');
+  const { dir, tool } = setup({}, { approval: stub });
+  tool.execute({ target: 'memory', action: 'add', content: 'old fact' }, {});
+  const res = await tool.execute(
+    { target: 'memory', action: 'patch', old_text: 'old fact', content: 'new fact' },
+    approvalExec,
+  );
+  assert.equal(res.success, true, JSON.stringify(res));
+  assert.equal(stub.calls.length, 1);
+  assert.equal(stub.calls[0].toolName, 'memory');
+  assert.match(stub.calls[0].reason, /修改记忆（memory）：old fact/);
+  assert.match(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8'), /new fact/);
+});
+
+test("approval 'rejected'：不写盘并返回拒绝文案", async () => {
+  const stub = approvalStub('rejected');
+  const { dir, tool } = setup({}, { approval: stub });
+  tool.execute({ target: 'memory', action: 'add', content: 'old fact' }, {});
+  const res = await tool.execute(
+    { target: 'memory', action: 'patch', old_text: 'old fact', content: 'new fact' },
+    approvalExec,
+  );
+  assert.equal(res.success, false);
+  assert.match(res.error, /rejected by the user/);
+  assert.equal(res.note, 'Nothing was written.');
+  assert.equal(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8'), 'old fact');
+});
+
+test("approval 'cancelled'：同样不写盘", async () => {
+  const stub = approvalStub('cancelled');
+  const { dir, tool } = setup({}, { approval: stub });
+  tool.execute({ target: 'memory', action: 'add', content: 'keep me' }, {});
+  const res = await tool.execute({ target: 'memory', action: 'remove', old_text: 'keep me' }, approvalExec);
+  assert.equal(res.success, false);
+  assert.equal(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8'), 'keep me');
+});
+
+test("approval 'unavailable'：转 pending，磁盘不变", async () => {
+  const stub = approvalStub('unavailable');
+  const { dir, tool } = setup({}, { approval: stub });
+  tool.execute({ target: 'memory', action: 'add', content: 'old fact' }, {});
+  const res = await tool.execute(
+    { target: 'memory', action: 'patch', old_text: 'old fact', content: 'new fact' },
+    approvalExec,
+  );
+  assert.equal(res.success, true, JSON.stringify(res));
+  assert.equal(res.staged, true);
+  assert.match(res.message, /审批通道不可用/);
+  assert.equal(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8'), 'old fact');
+  const listed = tool.execute({ action: 'list_pending' }, {});
+  assert.equal(listed.pending_count, 1);
+  assert.equal(listed.pending[0].action, 'patch');
+});
+
+test('审批调用抛错按 unavailable 处理（降级为 stage）', async () => {
+  const stub = approvalStub(new Error('approval service exploded'));
+  const { tool } = setup({}, { approval: stub });
+  tool.execute({ target: 'memory', action: 'add', content: 'old fact' }, {});
+  const res = await tool.execute(
+    { target: 'memory', action: 'patch', old_text: 'old fact', content: 'new fact' },
+    approvalExec,
+  );
+  assert.equal(res.success, true);
+  assert.equal(res.staged, true);
+});
+
+test("policy 'never'：不问审批，直接写", async () => {
+  const stub = approvalStub('rejected', { policy: 'never' });
+  const { dir, tool } = setup({}, { approval: stub });
+  tool.execute({ target: 'memory', action: 'add', content: 'old fact' }, {});
+  const res = await tool.execute(
+    { target: 'memory', action: 'patch', old_text: 'old fact', content: 'new fact' },
+    approvalExec,
+  );
+  assert.equal(res.success, true);
+  assert.equal(stub.calls.length, 0, 'never 策略下不发起 request');
+  assert.match(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8'), /new fact/);
+});
+
+test('纯 add 不需要审批', async () => {
+  const stub = approvalStub('rejected');
+  const { tool } = setup({}, { approval: stub });
+  const res = await tool.execute({ target: 'memory', action: 'add', content: 'fresh fact' }, approvalExec);
+  assert.equal(res.success, true);
+  assert.equal(stub.calls.length, 0);
+});
+
+test("approvalMode: 'auto'：不问审批，直接写", async () => {
+  const stub = approvalStub('rejected');
+  const { dir, tool } = setup({ approvalMode: 'auto' }, { approval: stub });
+  tool.execute({ target: 'memory', action: 'add', content: 'old fact' }, {});
+  const res = await tool.execute(
+    { target: 'memory', action: 'patch', old_text: 'old fact', content: 'new fact' },
+    approvalExec,
+  );
+  assert.equal(res.success, true);
+  assert.equal(stub.calls.length, 0);
+  assert.match(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8'), /new fact/);
+});
+
+test('batch 含破坏性操作也要审批，reason 说明是批量', async () => {
+  const stub = approvalStub('allowed-once');
+  const { tool } = setup({}, { approval: stub });
+  tool.execute({ target: 'memory', action: 'add', content: 'aaa bbb' }, {});
+  const res = await tool.execute(
+    { target: 'memory', operations: [{ action: 'patch', old_text: 'bbb', content: 'ccc' }, { action: 'add', content: 'more' }] },
+    approvalExec,
+  );
+  assert.equal(res.success, true, JSON.stringify(res));
+  assert.equal(stub.calls.length, 1);
+  assert.match(stub.calls[0].reason, /批量修改记忆（memory）：2 项/);
 });

@@ -34,7 +34,8 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
-| `dir` | `$DSH_MEMORY_DIR` → `$DSH_HOME/memories` → `~/.dsh/memories` | 记忆目录 |
+| `dir` | `$DSH_PROFILE_DIR/memories` → `$DSH_MEMORY_DIR` → `$DSH_HOME/memories` → `~/.dsh/memories` | 记忆目录 |
+| `profileScoped` | `true` | 有 profile 环境变量时，记忆落在 profile 目录（`DSH_PROFILE_DIR/memories` 或 `DSH_HOME/profiles/<DSH_PROFILE>/memories`） |
 | `memoryCharLimit` | `2200` | `MEMORY.md` 配额 |
 | `userCharLimit` | `1375` | `USER.md` 配额 |
 | `nudgeInterval` | `10` | 每多少个回合触发一次后台 review |
@@ -42,6 +43,8 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
 | `memoryEnabled` | `true` | 后台 review 里是否包含记忆回顾 |
 | `reviewPrompt` | — | 覆盖后台 review 的提示词全文 |
 | `provider` | `fork` | review 子会话用 `fork`（继承父上下文）还是 `spawn` |
+| `noticeMode` | `'on'` | review 完成后的主会话提示：`on` / `verbose`（附 3 条预览）/ `off` |
+| `approvalMode` | `'ask'` | 破坏性写入的审批策略：`ask`（`ctx.approval`）/ `stage`（直接排队）/ `auto`（直接写） |
 | `skillsDir` | `$DSH_SKILLS_DIR` → `~/.agents/skills` | `skill_manage` 写技能的位置 |
 | `skillsEnabled` | `true` | 关掉 `skill_manage` 工具 |
 | `curatorEnabled` | `true` | 关掉 curator |
@@ -50,6 +53,7 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
 | `curatorArchiveAfterDays` | `30` | 多久没动归档 |
 | `curatorKeepSnapshots` | `5` | 保留几份快照 |
 | `curatorPaused` | `false` | 暂停整理 |
+| `curatorConsolidate` | `'off'` | `suggest` 时在出现 stale 技能后起 fork，把记忆合并建议以 `stage` 提交 |
 | `strictReadBeforeWrite` | `true` | 技能写入前必须读过、且读后文件未变 |
 | `pendingDir` | `<dir>/pending` | 后台 review 的破坏性写入排队目录 |
 | `webPanelEnabled` | `true` | 关掉左侧栏面板与 `/api/dsh-memory-notes/*` 路由 |
@@ -123,6 +127,58 @@ per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默
   不做任何写入；结果 JSON 从 `content` 的 text block 解析，解析不出就只显示标题。
 - 注册走 `ctx.slots.inject("tool.call.toolview", …)`，和面板一起在 `ctx.effect` 的 cleanup 里逐个 dispose。
 
+## 0.6.0：review 可见、审批、profile 隔离与写入账本
+
+### Phase 1：review 完成后的主会话提示
+
+后台 review 跑完后，`src/nudge.js` 会给主会话 `inject` 一条 developer 消息（不是普通 user 消息，
+不会污染对话历史里的用户意图），并在面板里留一条记录：
+
+- `noticeMode: 'on'`（默认）显示「记忆已更新」与两库计数，例如
+  `MEMORY +1 ~0 -0 · USER +0 ~0 -0`；
+- `noticeMode: 'verbose'` 额外附最多 3 条变更预览（`+` 新增 / `-` 删除 / `~` 修改）；
+- `noticeMode: 'off'` 只记账本，不打扰主会话。
+- 提示走 `@deepseek-ai/dsh-llm` 的 `createDeveloperMessage`；宿主没导出时退化成同结构的
+  `{ role: 'developer', content: [{ type: 'text', text }], source: { kind: 'memory-review' } }`。
+- inject 失败只 `console.warn`，不影响 review 结果与账本。
+- 账本 `<dir>/review-log.json` 保留最近 50 条（`src/review-log.js`），记录 child/session id、
+  channel（`review` / `curator`）、两库 before/after 与 `summary`。
+
+### Phase 2：破坏性写入接入 `ctx.approval`
+
+`memory` 的 `patch` / `replace` / `remove` 以及含破坏性操作的 batch，在 `approvalMode: 'ask'`
+（默认）且宿主提供 `ctx.approval` 时会先请求审批：
+
+- `allowed-once` 放行；`rejected` / `cancelled` 不写盘并返回拒绝文案；
+- `effectivePolicy === 'never'` 时跳过审批直接写；
+- 审批服务缺失或 `request` 抛错时降级为 stage（写入 `/pending`），绝不隐式落盘；
+- `approvalMode: 'stage'` 直接排队，`approvalMode: 'auto'` 直接写；
+- 后台 review（`unattended`）的破坏性写入始终转 stage，`add` 仍直写。
+- 纯 `add` 不触发审批。
+
+### Phase 3：profile 隔离与提示词补全
+
+- `profileScoped: true`（默认）且存在 `DSH_PROFILE_DIR` 时，记忆目录为
+  `DSH_PROFILE_DIR/memories`；只有 `DSH_PROFILE` 时为 `DSH_HOME/profiles/<profile>/memories`；
+  显式配置的 `dir` 永远优先。
+- 首次在 profile 路径启动时，若 profile 目录还没有记忆，会把旧版共享目录里的
+  `MEMORY.md` / `USER.md` 复制过去（只复制，不删除旧文件）。
+- `MEMORY_TASK` 与工具说明补上 `session_search`，明确「跨会话历史查找」是 review 的合法输入。
+
+### Phase 4：写入账本、撤销、重复检测与 curator 建议制
+
+- **写入日志** `<dir>/write-log.jsonl`（`src/write-log.js`）：每次落盘记一条
+  `{ ts, action, target, before, after, source, batch }`，最多 200 行；`source` 来自
+  `store.lastSource`（`tool` / `review` / `panel`；curator 的合并建议先 stage，用户在面板应用时记 `panel`）。
+  写日志失败不影响真实写入。
+- **面板撤销**：左侧栏「最近变更」对单条 `add` / `remove` / `patch` / `replace` 提供撤销按钮，
+  分别映射为 `remove` / `add` / `patch`；batch 操作显示「批量操作不可撤销」。
+- **重复检测** `similarity()`：按 Unicode 字母数字分词后算 Jaccard，阈值 `0.6`。`add` / `patch`
+  命中近似条目时在结果里附 `warnings`，但**照常写入**，不替代确定性的重复拦截。
+- **curator 建议制** `curatorConsolidate: 'suggest'`：curator 发现有 stale 技能后起一个 fork，
+  要求它把「可合并/可删除」的建议以 `stage` 动作提交，而不是直接改写技能库；
+  默认 `'off'`，与 Hermes 的保守默认一致。
+
 ## Phase 2：后台 review（已实现）
 
 `src/nudge.js` 监听 `session/event` 的 `turn/end`，按 `nudgeInterval` 计数，到点用
@@ -160,7 +216,8 @@ per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默
 - 动手前打快照：优先 `tar -czf`，失败退化成逐项拷到 `.curator_backups/skills-<ts>`，只留最近 5 份
 - 每个动作追加一行到 `<skillsDir>/.curator_ledger.jsonl`（before/after sha256）
 - 运行状态写 `<dir>/curator-state.json`（last_run_at / run_count / last_summary）
-- 不做 LLM 合并（Hermes 的 `DEFAULT_CONSOLIDATE=False` 同款保守默认）
+- 默认不做 LLM 合并（Hermes 的 `DEFAULT_CONSOLIDATE=False` 同款保守默认）；
+  设 `curatorConsolidate: 'suggest'` 才起 fork，而且只允许以 `stage` 提交建议
 
 `skill_manage` 的 `status` 动作可以看到技能遥测与 curator 状态。
 
@@ -171,6 +228,9 @@ per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默
   需要省 token 时把 `provider` 改成 `spawn`（子会话看不到历史，只适合做纯整理）。
 - **curator 的归档有 15s 宽限**：状态文件写失败时用内存时间戳兜底，避免每回合重跑。
 - **记忆配额按 UTF-16 码元计**（`String.length`）；Hermes 是 Python 码点，emoji 多时数字会不同。
+- **面板写入/撤销不弹审批**：面板路由没有打开中的 agent turn，`ctx.approval.request` 的前置条件不成立，
+  因此面板（含撤销）直接走 `MemoryStore`，只把 `source` 标成 `panel` 记账；工具调用仍按 `approvalMode` 走审批。
+- **`noticeMode: 'on'` 依赖宿主支持 `agent.inject`**：宿主没有该能力时只记日志，不会伪造消息。
 
 ## 测试
 
@@ -184,3 +244,6 @@ node tests/skills.test.js        # 单文件（有些沙箱里 --test 的逐文�
 模式、技能名与宿主同规则、`old_string` 多处命中必须显式 `replace_all`、单条 `remove` 能清空记忆。
 0.4.0 的 `tests/web.test.js` 另覆盖面板 API：state 形状、add/patch/remove 往返、非法输入不改数据、
 pending 批准按 pin 重放、stale 拒绝并保留记录、缺 pin 的旧记录 fail-closed，以及回环守卫的七种场景。
+0.6.0 新增 `tests/review-log.test.js`、`tests/write-log.test.js`，并在 `nudge` / `tool` / `client` /
+`store` / `curator` 各补一组：review 提示三档、审批六种返回、面板区块与撤销文案、近似重复只告警不拦截、
+curator 建议制与降级。当前全量 **105 pass / 0 fail**。

@@ -12,13 +12,23 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
+import { clearReviewSession, markReviewSession } from './review-registry.js';
+import { diffEntries, summarizeDiff } from './review-log.js';
+
 const DEFAULTS = {
   intervalHours: 168,
   staleAfterDays: 14,
   archiveAfterDays: 30,
   keepSnapshots: 5,
   paused: false,
+  consolidate: 'off',
 };
+
+const CONSOLIDATE_PROMPT = `Review memory for entries that duplicate or overlap each other and consolidate them.
+
+Use ONLY the memory tool. Put every proposed merge or shortening into ONE 'operations' batch and submit that
+batch with action:'stage' so it lands in the pending queue for the user to approve. Do not write directly.
+If nothing needs consolidating, say 'Nothing to consolidate.' and stop.`;
 
 function sha256File(target) {
   try {
@@ -30,7 +40,7 @@ function sha256File(target) {
 
 const DAY = 24 * 60 * 60 * 1000;
 
-export function createCurator({ library, stateDir, config = {} }) {
+export function createCurator({ library, stateDir, config = {}, ctx, store, reviewLog }) {
   const settings = { ...DEFAULTS, ...config };
   const skillsDir = library.dir;
   const statePath = path.join(stateDir, 'curator-state.json');
@@ -144,6 +154,97 @@ export function createCurator({ library, stateDir, config = {} }) {
     return destination;
   }
 
+  function getService(name) {
+    try {
+      return typeof ctx?.get === 'function' ? ctx.get(name) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function snapshotStore() {
+    const out = { memory: [], user: [] };
+    if (store && typeof store.load === 'function') {
+      for (const target of ['memory', 'user']) {
+        try {
+          out[target] = store.load(target) ?? [];
+        } catch {
+          out[target] = [];
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 建议制：有 stale 技能时起一个后台 fork，让它把「需要合并/精简的记忆条目」整理成
+   * 一个 batch 并用 action='stage' 提交（自动进 pending），绝不直接写。
+   */
+  function launchConsolidation({ session, startedAt }) {
+    const subagents = getService('subagents');
+    const agents = getService('agents');
+    if (
+      !subagents ||
+      typeof subagents.startActivation !== 'function' ||
+      !agents ||
+      typeof agents.get !== 'function'
+    ) {
+      console.warn('[memory-notes] curator consolidation needs subagents + agents; skipping');
+      return;
+    }
+    const parent = session?.id ? agents.get(session.id) : undefined;
+    if (!parent) {
+      console.warn('[memory-notes] curator consolidation skipped: no parent agent');
+      return;
+    }
+    const before = snapshotStore();
+    let activation;
+    try {
+      activation = subagents.startActivation({
+        provider: 'fork',
+        label: 'memory-curator',
+        request: { prompt: [{ type: 'text', text: CONSOLIDATE_PROMPT }], parent },
+        delivery: 'caller',
+      });
+    } catch (error) {
+      console.warn(`[memory-notes] failed to start curator consolidation: ${error?.message ?? error}`);
+      return;
+    }
+    Promise.resolve(activation).then(
+      ({ childId, result }) => {
+        if (typeof childId === 'string') markReviewSession(childId);
+        Promise.resolve(result)
+          .then(
+            () => {},
+            (error) => console.warn(`[memory-notes] curator consolidation failed: ${error?.message ?? error}`),
+          )
+          .then(() => {
+            if (typeof childId === 'string') clearReviewSession(childId);
+            try {
+              const after = snapshotStore();
+              const memory = diffEntries(before.memory, after.memory);
+              const user = diffEntries(before.user, after.user);
+              reviewLog?.record?.({
+                channel: 'curator',
+                session_id: session?.id,
+                child_id: childId,
+                started_at: startedAt,
+                finished_at: Date.now(),
+                memory,
+                user,
+                summary: summarizeDiff({ memory, user }),
+              });
+            } catch (error) {
+              console.warn(`[memory-notes] failed to record curator consolidation: ${error?.message ?? error}`);
+            }
+          });
+      },
+      (error) => {
+        console.warn(`[memory-notes] failed to start curator consolidation: ${error?.message ?? error}`);
+      },
+    );
+  }
+
   /** 到点了吗：只按时间判断，调用方可以每轮都问，成本是一次 stat + 一次读。 */
   function due(now = Date.now()) {
     if (settings.paused) return false;
@@ -155,7 +256,7 @@ export function createCurator({ library, stateDir, config = {} }) {
     return now - last >= settings.intervalHours * 60 * 60 * 1000;
   }
 
-  function run({ now = Date.now(), reason = 'interval' } = {}) {
+  function run({ now = Date.now(), reason = 'interval', session } = {}) {
     const skills = library.activity();
     const summary = { started_at: new Date(now).toISOString(), reason, snapshot: undefined, stale: [], archived: [], skipped: [] };
     if (skills.length === 0) {
@@ -207,6 +308,12 @@ export function createCurator({ library, stateDir, config = {} }) {
       last_summary: summary,
     };
     writeState(next);
+
+    const hasStale =
+      summary.stale.length > 0 || skills.some((skill) => skill.state === 'stale' && !skill.pinned);
+    if (settings.consolidate === 'suggest' && hasStale) {
+      launchConsolidation({ session, startedAt: now });
+    }
     return summary;
   }
 

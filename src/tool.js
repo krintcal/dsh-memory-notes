@@ -36,7 +36,9 @@ const DESCRIPTION = `Save durable facts to persistent memory that survive across
 'operations' batch (patch shortens an entry, remove drops one entirely) — never retry the same call unchanged.
 **TARGETS**: one fact goes to ONE store, never both.
 **SKIP**: trivial chit-chat, facts you can re-derive with a quick look, raw data dumps, finished-task logs,
-temporary state. Task progress belongs in the session; reusable procedures belong in a skill (skill_manage).
+temporary state. Do not store task progress, past conversation, or completed work — recall them with
+session_search when the host provides it. Memory holds only facts that stay true across sessions; reusable
+procedures belong in a skill (skill_manage).
 
 Patch edits a span inside one entry and keeps the rest; remove deletes a whole entry. Destructive edits (patch /
 remove) are never applied blind by a background review: they are proposed with 'stage' and the main session applies
@@ -129,9 +131,73 @@ const STAGED_MESSAGE =
   'Background review may not delete memory entries unattended. The proposed %s was staged for your approval — ' +
   "review it with action='list_pending' (then 'apply_pending' to apply, 'discard_pending' to drop).";
 
-export function toolDefinition({ store, limits, pendingDir, pending: sharedPending } = {}) {
+const APPROVAL_STAGED_MESSAGE = '审批通道不可用，已排队，请在左侧栏「记忆」面板确认';
+
+const REJECTED_RESULT = {
+  success: false,
+  error: 'Memory write was rejected by the user.',
+  note: 'Nothing was written.',
+};
+
+/**
+ * 向宿主审批服务要一个决定。返回 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable' | 'skip'。
+ * 任何异常都降级成 'unavailable'，绝不让工具抛错。
+ */
+export async function requestApproval({ approval, agent, callId }, description) {
+  if (!approval) return 'unavailable';
+  try {
+    if (approval.effectivePolicy?.(agent?.session) === 'never') return 'skip';
+  } catch {
+    /* policy 查询失败就继续问 */
+  }
+  if (typeof approval.request !== 'function') return 'unavailable';
+  try {
+    return await approval.request({ agent, toolName: 'memory', callId, reason: description });
+  } catch {
+    return 'unavailable';
+  }
+}
+
+function approvalReason(input, operations, target) {
+  if (operations) {
+    return `批量修改记忆（${target}）：${operations.length} 项，含删除/改写`;
+  }
+  const span = typeof input.old_text === 'string' ? input.old_text.slice(0, 60) : '';
+  const verb = input.action === 'remove' ? '删除记忆' : '修改记忆';
+  return `${verb}（${target}）：${span}`;
+}
+
+export function toolDefinition({
+  store,
+  limits,
+  pendingDir,
+  pending: sharedPending,
+  approval,
+  getAgent,
+  config = {},
+} = {}) {
   if (!store) throw new Error('toolDefinition requires a store');
   const pending = sharedPending ?? createPendingStore(pendingDir);
+  const approvalMode = config.approvalMode ?? 'ask';
+  const approvalConfigured = approval !== undefined;
+
+  function resolveApproval() {
+    try {
+      return typeof approval === 'function' ? approval() : approval;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function resolveAgent(exec, sessionId) {
+    const direct = exec?.agent ?? exec?.session?.agent;
+    if (direct && typeof direct === 'object') return direct;
+    try {
+      return typeof getAgent === 'function' ? getAgent(sessionId) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
 
   function pendingUnavailable() {
     return { success: false, error: 'pending queue is unavailable (no pendingDir configured)' };
@@ -224,6 +290,50 @@ export function toolDefinition({ store, limits, pendingDir, pending: sharedPendi
     return stageSingle(input, target, action);
   }
 
+  /** 把破坏性写入转成待确认提案（后台 review / stage 模式 / 审批不可用共用）。 */
+  function stageDestructive(input, operations, message) {
+    if (!pending.enabled) return pendingUnavailable();
+    const target = input.target;
+    try {
+      checkTarget(store, target);
+    } catch (err) {
+      return failureResult(err);
+    }
+    const staged = operations ? stageBatch(operations, target) : stageSingle(input, target, input.action);
+    if (!staged.success) return staged;
+    return {
+      success: true,
+      staged: true,
+      proposal_staged: true,
+      pending_id: staged.pending_id,
+      message: message ?? STAGED_MESSAGE.replace('%s', operations ? 'batch' : `'${input.action}'`),
+    };
+  }
+
+  /** ask 模式：问宿主审批；拒绝则不写，通道不可用则转 pending。 */
+  function approvalWrite(input, operations, exec) {
+    const target = input.target;
+    try {
+      checkTarget(store, target);
+    } catch (err) {
+      return Promise.resolve(failureResult(err));
+    }
+    const sessionId = sessionIdFromExec(exec);
+    const agent = resolveAgent(exec, sessionId);
+    const callId = exec?.callId ?? exec?.call?.id;
+    const description = approvalReason(input, operations, target);
+    const approvalService = resolveApproval();
+    return requestApproval({ approval: approvalService, agent, callId }, description).then((outcome) => {
+      if (outcome === 'rejected' || outcome === 'cancelled') return { ...REJECTED_RESULT };
+      if (outcome === 'unavailable') return stageDestructive(input, operations, APPROVAL_STAGED_MESSAGE);
+      try {
+        return applyWrite(input, 'tool');
+      } catch (err) {
+        return failureResult(err);
+      }
+    });
+  }
+
   function applyPending(input) {
     if (!pending.enabled) return pendingUnavailable();
     if (input.action === 'list_pending') {
@@ -250,8 +360,9 @@ export function toolDefinition({ store, limits, pendingDir, pending: sharedPendi
     }
   }
 
-  /** 真正执行一次写请求（add / batch / 单条）。 */
-  function applyWrite(input) {
+  /** 真正执行一次写请求（add / batch / 单条）。source 供写入日志区分来源。 */
+  function applyWrite(input, source = 'tool') {
+    store.lastSource = source;
     const operations = Array.isArray(input.operations) ? input.operations : undefined;
     if (operations) {
       if (operations.length === 0) return { success: false, error: 'operations list is empty.' };
@@ -340,25 +451,25 @@ export function toolDefinition({ store, limits, pendingDir, pending: sharedPendi
           return { success: false, error: `Unknown action '${action}'. Use: add, patch, remove` };
         }
 
-        // 后台 review 不许直写破坏性改动：整批/单条转成 pending 提案。
         const unattended = isReviewSession(sessionIdFromExec(exec));
         const destructive = operations ? hasDestructive(operations) : DESTRUCTIVE_ACTIONS.has(action);
-        if (unattended && destructive) {
-          if (!pending.enabled) return pendingUnavailable();
-          const target = input.target;
-          checkTarget(store, target);
-          const staged = operations ? stageBatch(operations, target) : stageSingle(input, target, action);
-          if (!staged.success) return staged;
-          return {
-            success: true,
-            staged: true,
-            proposal_staged: true,
-            pending_id: staged.pending_id,
-            message: STAGED_MESSAGE.replace('%s', operations ? 'batch' : `'${action}'`),
-          };
+
+        // 后台 review 不许直写破坏性改动：整批/单条转成 pending 提案。
+        if (unattended) {
+          if (destructive) {
+            return stageDestructive(input, operations, STAGED_MESSAGE.replace('%s', operations ? 'batch' : `'${action}'`));
+          }
+          return applyWrite(input, 'review');
         }
 
-        return applyWrite(input);
+        // 主会话的破坏性写入：auto 直写；stage 直接排队；ask 走宿主审批。
+        if (destructive) {
+          if (approvalMode === 'auto') return applyWrite(input, 'tool');
+          if (approvalMode === 'stage') return stageDestructive(input, operations);
+          if (approvalConfigured) return approvalWrite(input, operations, exec);
+        }
+
+        return applyWrite(input, 'tool');
       } catch (err) {
         return failureResult(err);
       }

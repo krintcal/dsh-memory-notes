@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { MemoryStore, MemoryError, ENTRY_DELIMITER } from '../src/store.js';
+import { MemoryStore, MemoryError, ENTRY_DELIMITER, similarity } from '../src/store.js';
 
 function freshStore(opts = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-'));
@@ -180,4 +180,48 @@ test('replace 内容含 § 被拒绝且数据不变', () => {
   assert.throws(() => store.replace('memory', 'alpha beta', 'x\n§\ny'), MemoryError);
   assert.deepEqual(store.entries('memory'), ['alpha beta']);
   assert.deepEqual(new MemoryStore({ dir: store.dir }).load('memory'), ['alpha beta']);
+});
+
+/* ------------------------- Phase 4：重复检测（warning 不阻止写入） ------------------------- */
+
+test('similarity：按词 Jaccard，标点与大小写不影响', () => {
+  assert.equal(similarity('Hello, world!', 'hello world'), 1);
+  assert.equal(similarity('alpha beta', 'gamma delta'), 0);
+  assert.ok(similarity('User prefers concise replies', 'User prefers very concise replies please') >= 0.6);
+});
+
+test('add 命中近似条目时返回 warnings，但两条都落盘', () => {
+  const store = freshStore();
+  const first = store.add('memory', 'User prefers concise replies');
+  assert.equal(first.warnings, undefined);
+
+  const second = store.add('memory', 'User prefers very concise replies please');
+  assert.equal(second.success, true);
+  assert.ok(Array.isArray(second.warnings));
+  assert.match(second.warnings[0], /Similar entry exists/);
+  assert.match(second.warnings[0], /User prefers concise replies/);
+
+  const raw = fs.readFileSync(path.join(store.dir, 'MEMORY.md'), 'utf8');
+  assert.match(raw, /concise replies/);
+  assert.match(raw, /very concise replies please/);
+});
+
+test('无关文本不产生 warning', () => {
+  const store = freshStore();
+  store.add('memory', 'User prefers concise replies');
+  const res = store.add('memory', 'Repo lives at E:\\dsh\\work');
+  assert.equal(res.success, true);
+  assert.equal(res.warnings, undefined);
+});
+
+test('patch 后的新条目也做近似检测（排除自己）', () => {
+  const store = freshStore();
+  store.add('memory', 'User prefers concise replies');
+  store.add('memory', 'User prefers very detailed answers');
+  const res = store.patch('memory', 'very detailed', 'concise');
+  assert.equal(res.success, true);
+  // 改完后与第一条高度相似（本身几乎重复），应提示
+  assert.ok(Array.isArray(res.warnings), JSON.stringify(res));
+  assert.match(res.warnings[0], /Similar entry exists/);
+  assert.equal(store.entries('memory').length, 2, 'warning 不改变写入结果');
 });

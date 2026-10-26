@@ -96,6 +96,12 @@ window.__ModuleLoader__.load({
 			transition: "width 160ms ease",
 		});
 
+		function formatClock(value) {
+			const date = value instanceof Date ? value : new Date(value);
+			if (Number.isNaN(date.getTime())) return "";
+			return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+		}
+
 		/* ------------------------------- entry card ------------------------------ */
 
 		function EntryCard({ target, entry, index, busy, onSave, onRemove }) {
@@ -262,6 +268,95 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		function writeSummary(item) {
+			const values = [item.after, item.before, item.content, item.old_text];
+			const text = values.find((value) => typeof value === "string" && value.trim() !== "");
+			return text ? clipText(text, 80) : "";
+		}
+
+		function undoBody(item) {
+			if (!item || item.batch) return undefined;
+			if (item.action === "add" && typeof item.after === "string") {
+				return { target: item.target, action: "remove", old_text: item.after };
+			}
+			if (item.action === "remove" && typeof item.before === "string") {
+				return { target: item.target, action: "add", content: item.before };
+			}
+			if (
+				(item.action === "patch" || item.action === "replace") &&
+				typeof item.after === "string" &&
+				typeof item.before === "string"
+			) {
+				return { target: item.target, action: "patch", old_text: item.after, content: item.before };
+			}
+			return undefined;
+		}
+
+		function ReviewsSection({ items }) {
+			const list = Array.isArray(items) ? items : [];
+			return h(
+				"section",
+				{ style: card },
+				h(
+					"div",
+					{ style: { ...row, justifyContent: "space-between", marginBottom: "8px" } },
+					h("strong", { style: { fontSize: "14px" } }, "最近 review"),
+					h("span", { style: muted }, `${list.length} 条`),
+				),
+				list.length === 0
+					? h("div", { style: muted }, "还没有后台 review 记录")
+					: list.map((item) =>
+							h(
+								"div",
+								{
+									key: item.id,
+									style: { ...row, justifyContent: "space-between", gap: "12px", padding: "3px 0" },
+								},
+								h("span", { style: { fontSize: "13px", wordBreak: "break-word" } }, item.summary || ""),
+								h("span", { style: { ...muted, whiteSpace: "nowrap" } }, formatClock(item.finished_at)),
+							),
+						),
+			);
+		}
+
+		function WritesSection({ items, busy, onWrite }) {
+			const list = Array.isArray(items) ? items : [];
+			return h(
+				"section",
+				{ style: card },
+				h(
+					"div",
+					{ style: { ...row, justifyContent: "space-between", marginBottom: "8px" } },
+					h("strong", { style: { fontSize: "14px" } }, "最近变更"),
+					h("span", { style: muted }, `${list.length} 条`),
+				),
+				list.length === 0
+					? h("div", { style: muted }, "还没有写入记录")
+					: list.map((item, index) => {
+							const undo = undoBody(item);
+							return h(
+								"div",
+								{ key: `${item.ts}:${index}`, style: { ...card, padding: "8px 10px", marginBottom: "8px" } },
+								h(
+									"div",
+									{ style: { ...row, justifyContent: "space-between", marginBottom: "3px" } },
+									h(
+										"span",
+										{ style: { fontSize: "13px" } },
+										`${formatClock(item.ts)} · ${item.action} · ${item.target}`,
+									),
+									item.batch
+										? h("span", { style: muted }, "批量操作不可撤销")
+										: undo
+											? h("button", { style: smallBtn, disabled: busy, onClick: () => onWrite(undo) }, "撤销")
+											: null,
+								),
+								h("div", { style: { ...muted, wordBreak: "break-word" } }, writeSummary(item)),
+							);
+						}),
+			);
+		}
+
 		/* ---------------------------------- page --------------------------------- */
 
 		function PanelPage() {
@@ -397,6 +492,8 @@ window.__ModuleLoader__.load({
 				user ? h(StoreSection, { target: "user", title: "USER PROFILE · 用户是谁", subtitle: "偏好、期望、背景；一条事实只进一个库。", view: user, busy, onWrite }) : null,
 				memory ? h(StoreSection, { target: "memory", title: "MEMORY · 我的工作笔记", subtitle: "环境事实、工具怪癖、项目约定与路径。", view: memory, busy, onWrite }) : null,
 				h(PendingSection, { items: state.pending, busy, onDecide }),
+				h(ReviewsSection, { items: state.reviews }),
+				h(WritesSection, { items: state.writes, busy, onWrite }),
 			);
 		}
 

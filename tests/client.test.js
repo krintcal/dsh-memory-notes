@@ -177,3 +177,82 @@ test("skill tool row renders its own labels", async () => {
 	assert.match(textOf(row), /已更新技能/);
 	assert.match(textOf(row), /dsh-cordis-plugin/);
 });
+
+/* ---------------------- Phase 1 / 4：面板的 review 与变更区块 ---------------------- */
+
+function panelReact(values) {
+	const react = fakeReact();
+	let index = 0;
+	react.useState = (initial) => [index < values.length ? values[index++] : initial, () => {}];
+	return react;
+}
+
+function renderText(node) {
+	if (node === null || node === undefined || node === false) return "";
+	if (typeof node === "string" || typeof node === "number") return String(node);
+	if (Array.isArray(node)) return node.map(renderText).join(" ");
+	if (typeof node === "object") {
+		if (typeof node.type === "function") return renderText(node.type(node.props));
+		if (Array.isArray(node.children)) return renderText(node.children);
+	}
+	return "";
+}
+
+function panelState(overrides = {}) {
+	return {
+		ok: true,
+		targets: {
+			memory: { entries: [], used: 0, limit: 2200, percent: 0, usage: "0% — 0/2,200 chars" },
+			user: { entries: [], used: 0, limit: 1375, percent: 0, usage: "0% — 0/1,375 chars" },
+		},
+		pending: [],
+		reviews: [],
+		writes: [],
+		...overrides,
+	};
+}
+
+async function renderPanel(state) {
+	const bundle = await loadBundle();
+	const exportsObject = bundle.factory(requireStub(panelReact([state, "", false, ""])));
+	const registrations = [];
+	exportsObject.apply(fakeCtx(registrations, []));
+	const main = registrations.find((entry) => entry.definition.name === "main");
+	assert.ok(main, "main panel must be registered");
+	return renderText(main.component());
+}
+
+test("面板在 state 带 reviews 时渲染「最近 review」", async () => {
+	const now = Date.now();
+	const text = await renderPanel(
+		panelState({
+			reviews: [{ id: "r1", summary: "MEMORY +1 ~0 -0 · USER +0 ~0 -0", finished_at: now }],
+		}),
+	);
+	assert.match(text, /最近 review/);
+	assert.match(text, /MEMORY \+1/);
+	assert.match(text, /\d{2}:\d{2}/);
+});
+
+test("面板的「最近变更」：单条有撤销按钮，batch 提示不可撤销", async () => {
+	const now = Date.now();
+	const text = await renderPanel(
+		panelState({
+			writes: [
+				{ ts: now, action: "add", target: "memory", before: null, after: "fresh note" },
+				{ ts: now, action: "patch", target: "memory", before: "old", after: "new" },
+				{ ts: now, action: "remove", target: "user", before: "gone", after: null },
+				{ ts: now, action: "patch", target: "memory", before: "a", after: "b", batch: true },
+			],
+		}),
+	);
+	assert.match(text, /最近变更/);
+	assert.match(text, /fresh note/);
+	assert.match(text, /撤销/);
+	assert.match(text, /批量操作不可撤销/);
+});
+
+test("面板没有 review 记录时给出空态文案", async () => {
+	const text = await renderPanel(panelState());
+	assert.match(text, /还没有后台 review 记录/);
+});

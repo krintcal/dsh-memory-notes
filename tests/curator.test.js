@@ -6,6 +6,7 @@ import test from 'node:test';
 import { spawnSync } from 'node:child_process';
 
 import { createCurator } from '../src/curator.js';
+import { createReviewLog } from '../src/review-log.js';
 import { createSkillLibrary } from '../src/skills.js';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -161,4 +162,85 @@ test('state 文件写不进去时 still 不会每回合重跑（内存时间戳�
   blockedCurator.run({ now });
   assert.equal(blockedCurator.due(now + 60_000), false, 'state 写失败后应凭内存时间戳抑制重跑');
   assert.equal(curator.due(now), true);
+});
+
+/* ------------------------- Phase 4：curator 建议制（suggest） ------------------------- */
+
+function curatorCtx(registrations = []) {
+  return {
+    ctx: {
+      get(name) {
+        if (name === "subagents") {
+          return {
+            startActivation(spec) {
+              registrations.push(spec);
+              return { childId: "curator-child", result: Promise.resolve() };
+            },
+          };
+        }
+        if (name === "agents") {
+          return { get: (id) => (id === "session-curator" ? { id, session: { id } } : undefined) };
+        }
+        return undefined;
+      },
+    },
+    registrations,
+  };
+}
+
+function staleWorkspace(now) {
+  const workspace = makeWorkspace();
+  workspace.library.create({ name: "stale-skill", description: "demo", body: "## steps" });
+  ageSkill(workspace.library, "stale-skill", 20, now);
+  return workspace;
+}
+
+test("consolidate: 'suggest' 且有 stale 条目时起一个 fork，提示词要求 stage", async () => {
+  const now = Date.parse("2026-10-24T12:00:00Z");
+  const { library, stateDir } = staleWorkspace(now);
+  const reviewLog = createReviewLog(fs.mkdtempSync(path.join(os.tmpdir(), "mem-curator-log-")));
+  const { ctx, registrations } = curatorCtx();
+
+  const curator = createCurator({
+    library,
+    stateDir,
+    ctx,
+    reviewLog,
+    config: { intervalHours: 1, consolidate: "suggest" },
+  });
+  curator.run({ now, session: { id: "session-curator" } });
+
+  assert.equal(registrations.length, 1, "应起一个后台 fork");
+  const prompt = registrations[0].request.prompt[0].text;
+  assert.match(prompt, /stage/);
+  assert.match(prompt, /operations/);
+  assert.equal(registrations[0].provider, "fork");
+
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reviewLog.count(), 1);
+  assert.equal(reviewLog.recent(1)[0].channel, "curator");
+});
+
+test("consolidate: 'off'（默认）不起子会话", () => {
+  const now = Date.parse("2026-10-24T12:00:00Z");
+  const { library, stateDir } = staleWorkspace(now);
+  const { ctx, registrations } = curatorCtx();
+
+  const curator = createCurator({ library, stateDir, ctx, config: { intervalHours: 1 } });
+  curator.run({ now, session: { id: "session-curator" } });
+
+  assert.equal(registrations.length, 0);
+});
+
+test("suggest 但拿不到 subagents/agents 时只降级，不抛错", () => {
+  const now = Date.parse("2026-10-24T12:00:00Z");
+  const { library, stateDir } = staleWorkspace(now);
+  const curator = createCurator({
+    library,
+    stateDir,
+    ctx: { get: () => undefined },
+    config: { intervalHours: 1, consolidate: "suggest" },
+  });
+  assert.doesNotThrow(() => curator.run({ now, session: { id: "session-curator" } }));
 });

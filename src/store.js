@@ -113,6 +113,26 @@ function wordsOf(value) {
   return new Set(String(value).toLowerCase().match(/\w+/g) ?? []);
 }
 
+export const SIMILARITY_THRESHOLD = 0.6;
+
+/** 近似文本检测：小写、去标点、按空白切词，Jaccard。重复/改写提示用，不阻止写入。 */
+export function similarity(a, b) {
+  const tokenize = (value) =>
+    new Set(
+      String(value)
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .split(/\s+/)
+        .filter(Boolean),
+    );
+  const left = tokenize(a);
+  const right = tokenize(b);
+  if (left.size === 0 || right.size === 0) return 0;
+  let overlap = 0;
+  for (const token of left) if (right.has(token)) overlap += 1;
+  return overlap / (left.size + right.size - overlap);
+}
+
 /** 零命中时按词重叠给 3 条最接近的条目，让模型能看出 old_text 哪里过期了。 */
 function closestEntries(entries, oldText) {
   const words = wordsOf(oldText);
@@ -166,11 +186,40 @@ function validateContent(value, target) {
 }
 
 export class MemoryStore {
-  constructor({ dir, memoryCharLimit = 2200, userCharLimit = 1375 } = {}) {
+  constructor({ dir, memoryCharLimit = 2200, userCharLimit = 1375, onWrite } = {}) {
     if (!dir) throw new Error('MemoryStore requires a dir');
     this.dir = dir;
     this.limits = { memory: memoryCharLimit, user: userCharLimit };
     this.cache = new Map(); // target -> string[] (load-time snapshot)
+    this.onWrite = typeof onWrite === 'function' ? onWrite : undefined;
+    // 调用方（工具层 / 面板）写前设置，store 读取后清空；batch 的所有 op 共用同一来源。
+    this.lastSource = undefined;
+  }
+
+  takeSource() {
+    const source = this.lastSource ?? 'tool';
+    this.lastSource = undefined;
+    return source;
+  }
+
+  logWrite(source, record, batch = false) {
+    if (!this.onWrite) return;
+    try {
+      this.onWrite({ source, ...(batch ? { batch: true } : {}), ...record });
+    } catch {
+      /* 审计日志失败不该影响写入 */
+    }
+  }
+
+  /** 近似条目提示（不阻止写入）：排除自己，取第一条 similarity >= 0.6 的。 */
+  similarWarnings(target, entry) {
+    if (!entry) return [];
+    const hit = this.entries(target).find(
+      (other) => other !== entry && similarity(other, entry) >= SIMILARITY_THRESHOLD,
+    );
+    if (!hit) return [];
+    const preview = hit.length > 80 ? `${hit.slice(0, 80)}...` : hit;
+    return [`Similar entry exists: "${preview}"`];
   }
 
   fileFor(target) {
@@ -402,6 +451,7 @@ export class MemoryStore {
   }
 
   add(target, content) {
+    const source = this.takeSource();
     const value = text(content).trim();
     if (!value) throw new MemoryError('Content cannot be empty.', { success: false, target });
     validateContent(value, target);
@@ -423,11 +473,14 @@ export class MemoryStore {
       }
       return { entries: next, message: 'Entry added.' };
     });
-    return this.respond(target, 'Entry added.');
+    this.logWrite(source, { action: 'add', target, before: null, after: value, content: value });
+    const warnings = this.similarWarnings(target, value);
+    return this.respond(target, 'Entry added.', warnings.length ? { warnings } : {});
   }
 
   /** 替换条目内的一个 span，条目其余原样保留（0.22.5 的 patch 语义）。 */
   patch(target, oldText, newText, matchedEntry) {
+    const source = this.takeSource();
     const needle = text(oldText).trim();
     if (!needle) {
       throw new MemoryError(
@@ -467,11 +520,22 @@ export class MemoryStore {
       extra = { patched_entry_before: before, patched_entry_after: outcome.patched };
       return { entries: next, extra, message: 'Entry patched.' };
     });
+    this.logWrite(source, {
+      action: 'patch',
+      target,
+      before: extra.patched_entry_before,
+      after: extra.patched_entry_after,
+      old_text: needle,
+      content: value,
+    });
+    const warnings = this.similarWarnings(target, extra.patched_entry_after);
+    if (warnings.length) extra = { ...extra, warnings };
     return this.respond(target, 'Entry patched.', extra);
   }
 
   /** 整条替换：old_text 只负责定位，不会把 span 拼进去（旧的 staged 记录重放用）。 */
   replace(target, oldText, newContent, matchedEntry) {
+    const source = this.takeSource();
     const needle = text(oldText).trim();
     if (!needle) {
       throw new MemoryError('old_text cannot be empty.', { success: false, target });
@@ -498,10 +562,19 @@ export class MemoryStore {
       }
       return { entries: next, message: 'Entry replaced.' };
     });
+    this.logWrite(source, {
+      action: 'replace',
+      target,
+      before: previous,
+      after: value,
+      old_text: needle,
+      content: value,
+    });
     return this.respond(target, 'Entry replaced.', { replaced_entry: previous });
   }
 
   remove(target, oldText, matchedEntry) {
+    const source = this.takeSource();
     const needle = text(oldText).trim();
     if (!needle) throw new MemoryError('old_text cannot be empty.', { success: false, target });
     let removed;
@@ -511,6 +584,13 @@ export class MemoryStore {
       const next = entries.filter((_, i) => i !== idx);
       return { entries: next, message: 'Entry removed.' };
     });
+    this.logWrite(source, {
+      action: 'remove',
+      target,
+      before: removed,
+      after: null,
+      old_text: needle,
+    });
     return this.respond(target, 'Entry removed.', { removed_entry: removed });
   }
 
@@ -519,6 +599,7 @@ export class MemoryStore {
     const working = [...entries];
     const matched = []; // 每个 op 选中的完整条目（add 为 null）
     const produced = new Map(); // 1-based op 序号 -> patch 产出的新条目
+    const changes = []; // 供写入日志：每个 op 一条 before/after
     for (const [i, rawOp] of operations.entries()) {
       const op = rawOp && typeof rawOp === 'object' ? rawOp : {};
       const act = op.action;
@@ -532,7 +613,10 @@ export class MemoryStore {
       if (act === 'add') {
         if (!content) throw this.batchFailure(target, `${pos}: content is required.${note}`);
         validateContent(content, target);
-        if (!working.includes(content)) working.push(content);
+        if (!working.includes(content)) {
+          working.push(content);
+          changes.push({ action: 'add', target, before: null, after: content, content });
+        }
         matched.push(null);
         continue;
       }
@@ -569,6 +653,14 @@ export class MemoryStore {
       if (act !== 'patch') {
         if (act === 'replace') working.splice(idx, 1, content);
         else working.splice(idx, 1);
+        changes.push({
+          action: act,
+          target,
+          before: previous,
+          after: act === 'replace' ? content : null,
+          old_text: oldText,
+          ...(act === 'replace' ? { content } : {}),
+        });
         matched.push(previous);
         continue;
       }
@@ -576,6 +668,14 @@ export class MemoryStore {
       const outcome = patchEntry(previous, oldText, content);
       if (outcome.error) throw this.batchFailure(target, `${pos}: ${outcome.error}${note}`);
       working.splice(idx, 1, outcome.patched);
+      changes.push({
+        action: 'patch',
+        target,
+        before: previous,
+        after: outcome.patched,
+        old_text: oldText,
+        content,
+      });
       matched.push(previous);
       produced.set(i + 1, outcome.patched);
     }
@@ -595,7 +695,7 @@ export class MemoryStore {
           `shortening patches of other stale entries to the same batch, then retry.${note}`,
       );
     }
-    return { entries: working, matched, produced };
+    return { entries: working, matched, produced, changes };
   }
 
   buildExtra(operations, matched, produced) {
@@ -625,13 +725,17 @@ export class MemoryStore {
     if (!Array.isArray(operations) || operations.length === 0) {
       throw new MemoryError('operations list is empty.', { success: false, target });
     }
+    const source = this.takeSource();
     const note = ' No operations were applied (batch is all-or-nothing).';
     let extra = {};
+    let changes = [];
     this.write(target, (entries) => {
       const walk = this.walkBatch(target, entries, operations, note);
+      changes = walk.changes;
       extra = this.buildExtra(operations, walk.matched, walk.produced);
       return { entries: walk.entries, extra, message: `Applied ${operations.length} operation(s).` };
     });
+    for (const change of changes) this.logWrite(source, change, true);
     return this.respond(target, `Applied ${operations.length} operation(s).`, extra);
   }
 
