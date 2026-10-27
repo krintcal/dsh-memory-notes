@@ -16,6 +16,9 @@ export const SNAPSHOT_NOTE =
   'the memory tool to add, patch, or remove entries; a background curator may still propose destructive edits, ' +
   'which wait in the pending queue for approval.';
 
+export const SEARCH_HINT =
+  'project/daily 日志与更早的条目不注入上下文：需要时用 memory_search 工具检索（只读，不改记忆）。';
+
 export const CLOSING_HINT =
   "每回合收尾：向 project 写 1 条本回合进展（memory 工具 target='project'，没有进展就跳过），向 daily 写 1 条当天小结（target='daily'，同一天可 patch 同一条）。";
 
@@ -77,6 +80,7 @@ export function renderLiveSnapshot({ store, layout, branch, review, reviewMode =
 
   const lines = [];
   // layeredTargets:false 时没有 project/daily 轨，别提示模型去写不存在的 target。
+  lines.push(SEARCH_HINT);
   if (layout?.layered !== false) lines.push(CLOSING_HINT);
   if (review) lines.push(reviewStatusLine(review, reviewMode));
   if (effectiveBranch) lines.push(branchLine(effectiveBranch));

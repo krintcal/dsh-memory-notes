@@ -32,6 +32,16 @@ One fact goes to ONE store, never both.`;
 const MEMORY_TASK = `Review the conversation above and consider saving to memory if appropriate. If something stands out, save
 it once, in the right store, using the memory tool with the matching target. Batch several changes into ONE
 'operations' call. If nothing is worth saving, just say 'Nothing to save.' and stop.
+
+Selection gate — save ONLY if all three hold:
+1. It stays true across sessions (not just for this task).
+2. Knowing it next time prevents a real mistake or wasted work.
+3. It is not already covered by AGENTS.md, README, or a skill.
+Otherwise skip. Say "Nothing to save." rather than writing a low-value entry.
+One fact per entry, one short sentence (<= 200 chars). Never write version numbers, dates, PR numbers, changelogs,
+or "this session fixed X" — those belong to the project log (target='project'), not memory.
+If the write is rejected for being too long or a near-duplicate, do NOT retry the same text: split it into single
+facts, or patch the existing entry instead.
 Do not save task progress, conversation history, or completed work — look those up with session_search when the
 host provides it. Save only facts that stay true across sessions.`;
 

@@ -27,7 +27,7 @@ test('add 后能跨实例读回，条目以 § 分隔', () => {
 });
 
 test('memory 与 user 是两个独立文件与独立配额', () => {
-  const store = freshStore({ memoryCharLimit: 2200, userCharLimit: 40 });
+  const store = freshStore({ memoryCharLimit: 2200, userCharLimit: 40, entryCharLimit: 0, budgetGatePercent: 0 });
   store.add('memory', 'x'.repeat(2000));
   store.add('user', 'short');
   assert.equal(fs.existsSync(path.join(store.dir, 'MEMORY.md')), true);
@@ -78,7 +78,7 @@ test('remove 删除后其余条目保持顺序', () => {
 });
 
 test('batch 只在最终态校验配额：允许先删后加', () => {
-  const store = freshStore({ memoryCharLimit: 30 });
+  const store = freshStore({ memoryCharLimit: 30, budgetGatePercent: 0 });
   store.add('memory', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaa'); // 28 chars
   // 单独 add 一定失败
   assert.throws(() => store.add('memory', 'bbbb'), MemoryError);
@@ -288,4 +288,52 @@ test('withLock 写 owner.json 后再清理', () => {
     sawOwner = owner.pid === process.pid;
   });
   assert.equal(sawOwner, true);
+});
+
+test('0.10.0 写入门：单条超长被拒（提示 project/daily）', () => {
+  const store = freshStore({ entryCharLimit: 40 });
+  assert.throws(
+    () => store.add('memory', 'x'.repeat(41)),
+    /per-entry limit is 40 chars.*target='project'/,
+  );
+  assert.deepEqual(store.entries('memory'), []);
+});
+
+test('0.10.0 写入门：近似重复 add 被拒并给出现有条目', () => {
+  const store = freshStore({ addSimilarityLimit: 0.75 });
+  store.add('memory', 'config lives in dsh home directory now');
+  assert.throws(
+    () => store.add('memory', 'config lives in dsh home directory'),
+    /% similar.*use patch|UPDATE that entry with patch/,
+  );
+  assert.equal(store.entries('memory').length, 1);
+});
+
+test('0.10.0 写入门：0.6–0.75 近似只 warning 不拦', () => {
+  const store = freshStore({ addSimilarityLimit: 0.99 });
+  store.add('memory', 'alpha beta gamma delta');
+  const res = store.add('memory', 'alpha beta gamma epsilon');
+  assert.equal(res.success, true);
+  // similarity = 3/5 = 0.6，落在 warning 区间
+  assert.ok(Array.isArray(res.warnings) && res.warnings.length === 1, `expected warnings, got ${JSON.stringify(res)}`);
+});
+
+test('0.10.0 写入门：预算超过 85% 时单条 add 被拒，batch 可成', () => {
+  const store = freshStore({ memoryCharLimit: 100, budgetGatePercent: 85 });
+  store.add('memory', 'a'.repeat(40)); // 40/100
+  store.add('memory', 'b'.repeat(40)); // 83/100 = 83%
+  assert.throws(() => store.add('memory', 'ccc'), /above the 85% gate/);
+  const res = store.applyBatch('memory', [
+    { action: 'remove', old_text: 'aaaa' },
+    { action: 'add', content: 'ccc' },
+  ]);
+  assert.equal(res.success, true);
+  assert.deepEqual(store.entries('memory'), ['b'.repeat(40), 'ccc']);
+});
+
+test('0.10.0 写入门：addSimilarityLimit=0 关闭近似拦截，entryCharLimit=0 关闭长度限制', () => {
+  const store = freshStore({ addSimilarityLimit: 0, entryCharLimit: 0, budgetGatePercent: 0 });
+  store.add('memory', 'x'.repeat(500));
+  const res = store.add('memory', 'x'.repeat(500) + ' tail');
+  assert.equal(res.success, true);
 });

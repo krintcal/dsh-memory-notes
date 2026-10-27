@@ -23,6 +23,7 @@ import { loadReviewState, reviewStatus } from './src/review-state.js';
 import { reviewToolDefinition } from './src/review-tool.js';
 import { createSkillLibrary } from './src/skills.js';
 import { skillToolDefinition } from './src/skill-tool.js';
+import { searchToolDefinition } from './src/search-tool.js';
 import { renderLiveSnapshot } from './src/snapshot.js';
 import {
   count as countSuggestions,
@@ -134,6 +135,9 @@ export function apply(ctx, config = {}) {
     files: tracks.files,
     targets: tracks.targets,
     threatScan: config.threatScan !== false,
+    entryCharLimit: config.entryCharLimit ?? 200,
+    addSimilarityLimit: config.addSimilarityLimit ?? 0.75,
+    budgetGatePercent: config.budgetGatePercent ?? 85,
     onWrite: (record) => writeLog.append(record),
   });
   if (cwd) void primeBranch(cwd);
@@ -200,6 +204,8 @@ export function apply(ctx, config = {}) {
     };
   }
   ctx.tools.register(toolDefinition(toolDeps));
+  // 0.10.0：冷热分层——project/daily 与更早的条目不注入，按需检索。
+  if (config.searchEnabled !== false) ctx.tools.register(searchToolDefinition({ store }));
 
   if (scheduler) {
     ctx.tools.register(

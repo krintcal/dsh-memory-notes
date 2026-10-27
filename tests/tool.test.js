@@ -103,7 +103,7 @@ test('超限返回 success:false 与 current_entries', () => {
 });
 
 test('batch：先删后加通过，中途失败则磁盘不变', () => {
-  const { dir, tool } = setup({ memoryCharLimit: 30 });
+  const { dir, tool } = setup({ memoryCharLimit: 30, budgetGatePercent: 0 });
   tool.execute({ target: 'memory', action: 'add', content: 'a'.repeat(28) }, {});
 
   const ok = tool.execute(

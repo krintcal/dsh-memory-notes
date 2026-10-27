@@ -69,6 +69,10 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
 | `strictReadBeforeWrite` | `true` | 技能写入前必须读过、且读后文件未变 |
 | `pendingDir` | `<dir>/pending` | 后台 review 的破坏性写入排队目录 |
 | `webPanelEnabled` | `true` | 关掉左侧栏面板与 `/api/dsh-memory-notes/*` 路由 |
+| `entryCharLimit` | `200` | 单条 add 的字符上限（0 = 关闭）；超长条目提示拆成一条一事实 |
+| `addSimilarityLimit` | `0.75` | 单条 add 与既有条目相似度达到该值就拒绝（0 = 关闭），提示用 patch 合并 |
+| `budgetGatePercent` | `85` | 单条 add 会让占用超过该百分比时拒绝，要求用一个 batch 先腾空间（0 = 关闭） |
+| `searchEnabled` | `true` | 注册 `memory_search` 工具（跨五轨只读检索） |
 
 ## 0.2.0：两道安全门
 
@@ -192,6 +196,25 @@ per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默
 - **curator 建议制** `curatorConsolidate: 'suggest'`：curator 发现有 stale 技能后起一个 fork，
   要求它把「可合并/可删除」的建议以 `stage` 动作提交，而不是直接改写技能库；
   默认 `'off'`，与 Hermes 的保守默认一致。
+
+## 0.10.0：记忆选择性（写入门 + 检索）
+
+问题：0.9.x 的 `MEMORY` 到 99% 只有 8 条（平均 274 字符/条），其中还有「0.9.1 版本变更日志」——
+历史写进了长期记忆。根因是只有注入没有淘汰、只拒完全重复、写入门槛只写在提示词里。
+
+- **写入门（store 层，单条 `add` 生效）**
+  - `entryCharLimit`（默认 200）：超长条目直接拒绝，提示一条一事实、日志进 `project`/`daily`。
+  - `addSimilarityLimit`（默认 0.75）：与既有条目近重复（相似度 ≥ 0.75）时**拒绝 add**，
+    返回既有条目并要求用 `patch` 合并；0.6–0.75 仍只给 `warnings`。
+  - `budgetGatePercent`（默认 85）：add 会让占用超过该百分比时拒绝，要求用一个 `operations`
+    batch 先 patch/remove 腾空间（batch 本身是补救通道，不受单条 gate 拦截）。
+  - 全部阈值可配置、可置 0 关闭；只约束新写入，不动已有条目。
+- **提示词（`src/nudge.js`）**：review 加三问门槛（跨会话仍成立 / 能避免真错 / 未被 AGENTS.md
+  等覆盖），显式禁止版本号、日期、PR 号、changelog 叙事（→ `project` 轨），并说明被拒后不要
+  原样重试，应拆成单条事实或改 `patch`。
+- **冷热分层**：`memory`/`user`/`key` 仍注入；`project`/`daily` 与更早条目**不注入**，
+  需要时用新工具 `memory_search`（跨五轨，子串加权 + 词元重叠，`{target, entry, score}`，只读）。
+  快照里加一行提示指向它。`src/search.js` + `src/search-tool.js`。
 
 ## 0.9.0：记忆同步与疑似重复
 
@@ -392,4 +415,6 @@ curator 建议制与降级。0.7.0 新增 `tests/tracks.test.js`、`tests/review
 `tests/curator.test.js` 的建议制 fork 用例。
 0.9.0 新增 `tests/sync.test.js`（导出/合并/基线/本地删除不复活/远端删除只报告/applyDeletions/配额跳过/格式校验）
 与 `findConflictGroups` 用例，`tests/web.test.js` 补 sync 两条路由、鉴权拦截与 `state.conflicts`。
-当前全量 **165 pass / 0 fail**。
+0.10.0 新增 `tests/search.test.js`（分词/跨轨命中/target 过滤/limit 与稳定排序/工具入参校验）
+以及 store 的写入门用例（长度拒绝、近重复拒绝、0.6–0.75 只警告、85% 预算拒绝、batch 补救、阈值置 0 关闭）。
+当前全量 **178 pass / 0 fail**。

@@ -224,6 +224,9 @@ export class MemoryStore {
     headers,
     onWrite,
     threatScan = true,
+    entryCharLimit = 200,
+    addSimilarityLimit = 0.75,
+    budgetGatePercent = 85,
   } = {}) {
     if (!dir) throw new Error('MemoryStore requires a dir');
     this.dir = dir;
@@ -245,6 +248,10 @@ export class MemoryStore {
     this.lastSource = undefined;
     // 0.8.0：写入内容的提示注入扫描（可关闭，测试或特殊场景用）。
     this.threatScan = threatScan !== false;
+    // 0.10.0：写入门（选择性）。只在单条 add 上生效，batch 是补救通道。
+    this.entryCharLimit = Number(entryCharLimit) > 0 ? Number(entryCharLimit) : 0;
+    this.addSimilarityLimit = Number(addSimilarityLimit) > 0 ? Number(addSimilarityLimit) : 0;
+    this.budgetGatePercent = Number(budgetGatePercent) > 0 ? Number(budgetGatePercent) : 0;
   }
 
   /** 所有写入口的统一内容校验：§ 分隔符 + 提示注入（可选）。 */
@@ -287,6 +294,17 @@ export class MemoryStore {
     if (!hit) return [];
     const preview = hit.length > 80 ? `${hit.slice(0, 80)}...` : hit;
     return [`Similar entry exists: "${preview}"`];
+  }
+
+  /** 0.10.0：返回与 entry 最相似的既有条目（去掉自身），用于 add 的近似重复拦截。 */
+  nearestEntry(target, entry) {
+    let best;
+    for (const other of this.entries(target)) {
+      if (other === entry) continue;
+      const score = similarity(other, entry);
+      if (!best || score > best.score) best = { entry: other, score };
+    }
+    return best;
   }
 
   fileFor(target) {
@@ -551,10 +569,40 @@ export class MemoryStore {
     this.checkContent(value, target);
     const current = this.entries(target);
     if (current.includes(value)) return this.respond(target, 'Entry already exists (no duplicate added).');
+    if (this.entryCharLimit > 0 && value.length > this.entryCharLimit) {
+      throw new MemoryError(
+        `Entry is ${value.length} chars; the per-entry limit is ${this.entryCharLimit} chars. ` +
+          'Write ONE fact per entry: split this into several add calls, or put the log-like detail in ' +
+          "target='project' / target='daily'.",
+        { success: false, target, current_entries: [...current], usage: this.usageShort(target) },
+      );
+    }
+    const nearest = this.nearestEntry(target, value);
+    if (this.addSimilarityLimit > 0 && nearest && nearest.score >= this.addSimilarityLimit) {
+      const preview = nearest.entry.length > 120 ? `${nearest.entry.slice(0, 120)}...` : nearest.entry;
+      throw new MemoryError(
+        `Not added: an existing ${target} entry is already ${Math.round(nearest.score * 100)}% similar ` +
+          '(near-duplicates are rejected). UPDATE that entry with patch instead: old_text = a unique span of it, ' +
+          'content = the merged text. Existing entry: "' + preview + '"',
+        { success: false, target, current_entries: [...current], usage: this.usageShort(target) },
+      );
+    }
     this.write(target, (entries) => {
       const next = [...entries, value];
       const limit = this.limit(target);
       const total = this.serialize(next).length;
+      if (this.budgetGatePercent > 0 && total <= limit) {
+        const percent = Math.round((total / limit) * 100);
+        if (percent > this.budgetGatePercent) {
+          throw new MemoryError(
+            `${target} would be at ${percent}% (${fmt(total)}/${fmt(limit)} chars) right after this add — above the ` +
+              `${this.budgetGatePercent}% gate. Make room first in ONE 'operations' batch: patch stale or overly long ` +
+              'entries (see current_entries below) and add this entry in the same call — the limit is checked only on ' +
+              'the batch result.',
+            { success: false, target, current_entries: [...entries], usage: this.usageShort(target) },
+          );
+        }
+      }
       if (total > limit) {
         throw this.overflow(
           target,

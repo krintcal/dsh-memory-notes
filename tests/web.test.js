@@ -501,7 +501,8 @@ test('GET /sync 未通过鉴权时被拦截', async () => {
 });
 
 test('state 带 conflicts：高度相似的两条并列时给出提示', () => {
-  const { store, api } = fixture();
+  // 0.10.0 起 add 会拦近似重复（0.75），这里关掉写入门，只验证 conflicts 提示链路。
+  const { store, api } = fixture({ addSimilarityLimit: 0 });
   store.add('memory', 'config lives in dsh home');
   store.add('memory', 'config lives in dsh home directory');
   store.add('memory', 'unrelated fact about hermes gateway');
