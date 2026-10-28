@@ -70,9 +70,10 @@ node scripts/sync-to-profile.mjs   # 或 npm run sync
 | `pendingDir` | `<dir>/pending` | 后台 review 的破坏性写入排队目录 |
 | `webPanelEnabled` | `true` | 关掉左侧栏面板与 `/api/dsh-memory-notes/*` 路由 |
 | `entryCharLimit` | `200` | 单条 add 的字符上限（0 = 关闭）；超长条目提示拆成一条一事实 |
+| `logEntryCharLimit` | `600` | `project`/`daily` 日志轨的单条上限（0 = 关闭）；日志轨不受近似/预算门约束 |
 | `addSimilarityLimit` | `0.75` | 单条 add 与既有条目相似度达到该值就拒绝（0 = 关闭），提示用 patch 合并 |
 | `budgetGatePercent` | `85` | 单条 add 会让占用超过该百分比时拒绝，要求用一个 batch 先腾空间（0 = 关闭） |
-| `searchEnabled` | `true` | 注册 `memory_search` 工具（跨五轨只读检索） |
+| `searchEnabled` | `true` | 启用 `memory` 工具的 `action:'search'`（跨五轨只读检索；0.11.0 起合并，独立 `memory_search` 工具已删） |
 
 ## 0.2.0：两道安全门
 
@@ -197,6 +198,24 @@ per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默
   要求它把「可合并/可删除」的建议以 `stage` 动作提交，而不是直接改写技能库；
   默认 `'off'`，与 Hermes 的保守默认一致。
 
+## 0.11.0：工具面减法、日志轨与快照稳定
+
+两件事：**上下文成本**和**日志写不进去**。
+
+- **T1 回顾计数器移出快照**（`src/snapshot.js`）：`记忆回顾 N/10 轮` 里的计数每轮都变，
+  而 DSH 只在渲染文本变化时追加一条 user-role 消息 —— 结果每轮白追加一整块快照（还废掉
+  前缀缓存）。现在未到点**完全不输出**这一行，到点输出固定文案（不含计数）。
+- **T2 检索合并进 `memory`**：`memory_search` 独立工具下线，改为 `memory` 的
+  `action:'search'`（参数 `query` / `target` / `limit` 1–20）。省掉一份工具 schema
+  （约 1.4K 字符/请求），同时把 `memory` 的 description 从 1765 压到约 1.1K 字符。
+- **T4 工具返回值截断**（`src/store.js`）：错误里的 `current_entries` 最多 3 条
+  （另给 `entry_count` / `entries_truncated`）；`patched_entry_before/after`、
+  `replaced_entry`、`removed_entry` 以及 batch 的各 `*_entries` 都截到 160 字符加 `…`。
+  写盘/日志仍用完整内容。
+- **日志轨豁免**：`project`/`daily` 用独立上限 `logEntryCharLimit`（默认 600），且不参与
+  近似门（0.75）与 85% 预算门 —— 之前 200 字门把日志轨一起挡了，拒绝文案却劝「写不下放
+  project/daily」，自相矛盾。batch 仍不受单条 gate 约束。
+
 ## 0.10.0：记忆选择性（写入门 + 检索）
 
 问题：0.9.x 的 `MEMORY` 到 99% 只有 8 条（平均 274 字符/条），其中还有「0.9.1 版本变更日志」——
@@ -213,8 +232,8 @@ per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默
   等覆盖），显式禁止版本号、日期、PR 号、changelog 叙事（→ `project` 轨），并说明被拒后不要
   原样重试，应拆成单条事实或改 `patch`。
 - **冷热分层**：`memory`/`user`/`key` 仍注入；`project`/`daily` 与更早条目**不注入**，
-  需要时用新工具 `memory_search`（跨五轨，子串加权 + 词元重叠，`{target, entry, score}`，只读）。
-  快照里加一行提示指向它。`src/search.js` + `src/search-tool.js`。
+  需要时检索（跨五轨，子串加权 + 词元重叠，`{target, entry, score}`，只读）。0.11.0 起检索
+  并入 `memory` 工具的 `action:'search'`。`src/search.js`。
 
 ## 0.9.0：记忆同步与疑似重复
 
@@ -417,4 +436,4 @@ curator 建议制与降级。0.7.0 新增 `tests/tracks.test.js`、`tests/review
 与 `findConflictGroups` 用例，`tests/web.test.js` 补 sync 两条路由、鉴权拦截与 `state.conflicts`。
 0.10.0 新增 `tests/search.test.js`（分词/跨轨命中/target 过滤/limit 与稳定排序/工具入参校验）
 以及 store 的写入门用例（长度拒绝、近重复拒绝、0.6–0.75 只警告、85% 预算拒绝、batch 补救、阈值置 0 关闭）。
-当前全量 **178 pass / 0 fail**。
+当前全量 **183 pass / 0 fail**。

@@ -17,24 +17,23 @@ export const SNAPSHOT_NOTE =
   'which wait in the pending queue for approval.';
 
 export const SEARCH_HINT =
-  'project/daily 日志与更早的条目不注入上下文：需要时用 memory_search 工具检索（只读，不改记忆）。';
+  "project/daily 日志与更早的条目不注入上下文：需要时用 memory 工具的 action:'search' 检索（只读，不改记忆）。";
 
 export const CLOSING_HINT =
   "每回合收尾：向 project 写 1 条本回合进展（memory 工具 target='project'，没有进展就跳过），向 daily 写 1 条当天小结（target='daily'，同一天可 patch 同一条）。";
 
 export const REVIEW_STATUS_PREFIX = '记忆回顾：自上次回顾';
 
+/**
+ * 0.11.0（T1）：计数器不再进快照。DSH 只在渲染文本变化时追加一条 user-role 消息，
+ * 而 `turns_since` 每轮都变 → 每轮白追加一整块快照、破坏前缀缓存。现在只在到期时
+ * 输出一行固定文案（不含计数），未到期返回空串。
+ */
 export function reviewStatusLine(review, mode = 'suggest') {
-  const count = Number(review?.turns_since) || 0;
-  const interval = Math.max(1, Number(review?.interval) || 10);
-  const base = `${REVIEW_STATUS_PREFIX} ${count}/${interval} 轮`;
-  if (!review?.due) return `${base}。`;
-  const action =
-    mode === 'auto'
-      ? '用 memory 工具直接写入'
-      : "写入用 action:'suggest' 入队";
+  if (!review?.due) return '';
+  const action = mode === 'auto' ? '用 memory 工具直接写入' : "写入用 action:'suggest' 入队";
   return (
-    `${base} —— 本轮先用 memory 工具完成回顾（${action}，没有可写的就说 Nothing to save. 并跳过），` +
+    `${REVIEW_STATUS_PREFIX} —— 本轮先用 memory 工具完成回顾（${action}，没有可写的就说 Nothing to save. 并跳过），` +
     '完成后调用 memory_review_status 的 complete。'
   );
 }
@@ -82,7 +81,8 @@ export function renderLiveSnapshot({ store, layout, branch, review, reviewMode =
   // layeredTargets:false 时没有 project/daily 轨，别提示模型去写不存在的 target。
   lines.push(SEARCH_HINT);
   if (layout?.layered !== false) lines.push(CLOSING_HINT);
-  if (review) lines.push(reviewStatusLine(review, reviewMode));
+  const statusLine = review ? reviewStatusLine(review, reviewMode) : '';
+  if (statusLine) lines.push(statusLine);
   if (effectiveBranch) lines.push(branchLine(effectiveBranch));
   if (skillsHint) lines.push(skillsHint);
 

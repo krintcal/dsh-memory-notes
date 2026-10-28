@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import { MemoryStore } from '../src/store.js';
 import { tokenize, searchMemory } from '../src/search.js';
-import { searchToolDefinition } from '../src/search-tool.js';
+import { toolDefinition } from '../src/tool.js';
 
 function freshStore(opts = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memsearch-'));
@@ -58,35 +58,36 @@ test('searchMemory：limit 截断，排序稳定（同分按长度升序）', ()
   assert.ok(hits[0].entry.length <= hits[1].entry.length);
 });
 
-test('memory_search 工具：正常返回、空 query 报错、非法 target/limit 报错', () => {
+test('memory 工具的 search 动作：正常返回、空 query 报错、非法 target/limit 报错', () => {
   const store = freshStore();
   store.add('memory', 'User prefers concise replies');
-  const tool = searchToolDefinition({ store });
+  const tool = toolDefinition({ store });
 
-  assert.equal(tool.name, 'memory_search');
-  const ok = tool.execute({ query: 'concise' });
+  assert.equal(tool.name, 'memory');
+  assert.ok(tool.parameters.properties.action.enum.includes('search'), 'search 在 action enum 里');
+  const ok = tool.execute({ action: 'search', query: 'concise' });
   assert.equal(ok.success, true);
   assert.equal(ok.count, 1);
   assert.equal(ok.matches[0].entry, 'User prefers concise replies');
 
-  const empty = tool.execute({ query: '  ' });
+  const empty = tool.execute({ action: 'search', query: '  ' });
   assert.equal(empty.success, false);
   assert.match(empty.error, /query is required/);
 
-  const badTarget = tool.execute({ query: 'x', target: 'nope' });
+  const badTarget = tool.execute({ action: 'search', query: 'x', target: 'nope' });
   assert.equal(badTarget.success, false);
   assert.match(badTarget.error, /Unknown target/);
 
-  const badLimit = tool.execute({ query: 'x', limit: 99 });
+  const badLimit = tool.execute({ action: 'search', query: 'x', limit: 99 });
   assert.equal(badLimit.success, false);
   assert.match(badLimit.error, /limit must be an integer/);
 });
 
-test('memory_search 工具：未命中给出可执行提示', () => {
+test('memory 工具的 search 动作：未命中给出可执行提示', () => {
   const store = freshStore();
   store.add('memory', 'User prefers concise replies');
-  const tool = searchToolDefinition({ store });
-  const miss = tool.execute({ query: 'nosuchword' });
+  const tool = toolDefinition({ store });
+  const miss = tool.execute({ action: 'search', query: 'nosuchword' });
   assert.equal(miss.success, true);
   assert.equal(miss.count, 0);
   assert.match(miss.note, /No match/);

@@ -27,14 +27,14 @@ test('组装顺序：memory → user → key → 收尾提示 → 回顾状态 �
     store,
     layout,
     branch: 'main',
-    review: { due: false, turns_since: 3, interval: 10 },
+    review: { due: true, turns_since: 10, interval: 10 },
     reviewMode: 'suggest',
   });
   const memoryAt = text.indexOf('memory fact');
   const userAt = text.indexOf('user preference');
   const keyAt = text.indexOf('main fact');
   const closingAt = text.indexOf('每回合收尾');
-  const reviewAt = text.indexOf('记忆回顾：自上次回顾 3/10 轮。');
+  const reviewAt = text.indexOf('记忆回顾：自上次回顾');
   const branchAt = text.indexOf('当前 git 分支：main');
   assert.ok(memoryAt >= 0 && userAt > memoryAt && keyAt > userAt, '三段顺序');
   assert.ok(closingAt > keyAt && reviewAt > closingAt && branchAt > reviewAt, '尾部顺序');
@@ -63,7 +63,17 @@ test('到点的回顾提示区分 suggest / auto 措辞', () => {
   assert.match(suggest, /memory_review_status 的 complete/);
   assert.match(auto, /直接写入/);
   assert.doesNotMatch(auto, /action:'suggest'/);
-  assert.match(suggest, /10\/10 轮/);
+  assert.doesNotMatch(suggest, /\d+\/\d+ 轮/, '计数器不再进快照（T1）');
+});
+
+test('T1：未到点的回顾状态不进快照，且不同 turns_since 渲染逐字节相同', () => {
+  const { layout, store } = fixture();
+  store.add('memory', 'memory fact');
+  const low = renderLiveSnapshot({ store, layout, branch: 'main', review: { due: false, turns_since: 1, interval: 10 } });
+  const high = renderLiveSnapshot({ store, layout, branch: 'main', review: { due: false, turns_since: 9, interval: 10 } });
+  assert.equal(low, high, '计数变化不应改变快照文本（缓存稳定）');
+  assert.doesNotMatch(low, /记忆回顾/);
+  assert.equal(reviewStatusLine({ due: false, turns_since: 6, interval: 10 }), '');
 });
 
 test('store 抛错时不冒泡（调用方仍能拿到字符串）', () => {

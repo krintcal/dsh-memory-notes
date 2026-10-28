@@ -20,6 +20,7 @@ import {
   hasDestructive,
   summarizePending,
 } from './pending.js';
+import { searchMemory } from './search.js';
 
 const WIRE_ACTIONS = ['add', 'patch', 'remove'];
 
@@ -28,30 +29,22 @@ export const REPLACE_REMOVED =
   'the rest of the entry is kept. To rewrite a whole entry, set old_text to the whole entry. Nothing was written.';
 
 const DESCRIPTION = `Save durable facts to persistent memory that survive across sessions. Layered plain-text stores:
-- target 'user': who the user is — profile, preferences, expectations.
-- target 'memory': your own working notes — environment facts, tool quirks, project conventions, paths.
-- target 'key': short branch-scoped project facts; append [branch:main,release] to scope an entry to branches.
-- target 'project': this project's progress log (one entry per turn; skip if nothing happened).
-- target 'daily': today's running summary (one entry per day; patch it as the day goes on).
+- 'user': who the user is; 'memory': your own working notes (environment, quirks, conventions, paths);
+- 'key': short branch-scoped project facts, tag [branch:main,release]; 'project': per-turn progress log;
+- 'daily': today's summary (patch the same entry as the day goes on).
+'search' finds entries in every track without loading them; project/daily and older entries are not injected.
 
-**WHEN**: you learn a durable fact, correct a stale entry, or the user asks you to remember something.
-**IF FULL**: the limit is checked on the final state only. Combine removes and patches with the new entry in ONE
-'operations' batch (patch shortens an entry, remove drops one entirely) — never retry the same call unchanged.
-**TARGETS**: one fact goes to ONE store, never both.
-**SKIP**: trivial chit-chat, facts you can re-derive with a quick look, raw data dumps, finished-task logs,
-temporary state. Do not store task progress, past conversation, or completed work — recall them with
-session_search when the host provides it. Memory holds only facts that stay true across sessions; reusable
-procedures belong in a skill (skill_manage).
+WHEN a durable fact appears, a stale entry needs correcting, or the user asks to remember something. One fact goes
+to ONE store. SKIP chit-chat, re-derivable facts, raw dumps, finished-task logs, temporary state — procedures belong
+in a skill, history is reachable with 'search'.
+'patch' edits one span inside an entry and keeps the rest; 'remove' deletes a whole entry. Limits are checked on the
+batch result, so shrink stale entries and add the new one in ONE 'operations' batch instead of retrying unchanged.
+Unattended background reviews cannot delete: those writes are staged ('stage' + 'list_pending', then 'apply_pending'
+/ 'discard_pending'). In review mode 'suggest' queues memory/user/key entries for approval in the sidebar panel.`;
 
-Patch edits a span inside one entry and keeps the rest; remove deletes a whole entry. Destructive edits (patch /
-remove) are never applied blind by a background review: they are proposed with 'stage' and the main session applies
-them via 'apply_pending' after 'list_pending'.
-
-In review mode, 'suggest' queues a memory/user/key entry for the user to accept in the left sidebar instead of
-writing it directly; project/daily are always written directly.`;
-
-function parametersFor(targets) {
+function parametersFor(targets, { searchEnabled = true } = {}) {
   const list = Array.isArray(targets) && targets.length ? targets : ['memory', 'user'];
+  const actions = ['add', 'patch', 'remove', ...(searchEnabled ? ['search'] : []), 'suggest', 'stage', 'list_pending', 'apply_pending', 'discard_pending'];
   return {
     type: 'object',
     properties: {
@@ -64,7 +57,7 @@ function parametersFor(targets) {
       },
       action: {
         type: 'string',
-        enum: ['add', 'patch', 'remove', 'suggest', 'stage', 'list_pending', 'apply_pending', 'discard_pending'],
+        enum: actions,
         description:
           "'add' saves a new entry; 'patch' rewrites a span inside an existing entry; 'remove' deletes an entry; " +
           "'suggest' queues a memory/user/key entry for user approval; 'stage' defers a destructive write for " +
@@ -83,6 +76,16 @@ function parametersFor(targets) {
           "REQUIRED for 'patch' and 'remove': text from one entry. 'patch' replaces exactly this span (it must occur " +
           "once in the entry); 'remove' deletes the whole entry. Omit for 'add'. For 'stage' with op replace/remove, " +
           'this identifies the entry.',
+      },
+      query: {
+        type: 'string',
+        description: "For action 'search': words to look for (paths, names, error codes). Case-insensitive.",
+      },
+      limit: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 20,
+        description: "For action 'search': max matches to return (default 5).",
       },
       new_text: { type: 'string', description: "Alias of 'content'." },
       op: {
@@ -198,9 +201,10 @@ export function toolDefinition({
   if (!store) throw new Error('toolDefinition requires a store');
   const pending = sharedPending ?? createPendingStore(pendingDir);
   const approvalMode = config.approvalMode ?? 'ask';
+  const searchEnabled = config.searchEnabled !== false;
   const approvalConfigured = approval !== undefined;
   const targets = Array.isArray(store.targets) && store.targets.length ? store.targets : ['memory', 'user'];
-  const parameters = parametersFor(targets);
+  const parameters = parametersFor(targets, { searchEnabled });
 
   function resolveApproval() {
     try {
@@ -419,7 +423,7 @@ export function toolDefinition({
           {
             success: false,
             target,
-            current_entries: [...store.entries(target)],
+            ...store.currentPreview(store.entries(target)),
             usage: store.usageShort(target),
           },
         );
@@ -436,7 +440,7 @@ export function toolDefinition({
       }
       return store.remove(target, oldText);
     }
-    return { success: false, error: `Unknown action '${action}'. Use: add, patch, remove, suggest` };
+    return { success: false, error: `Unknown action '${action}'. Use: add, patch, remove${searchEnabled ? ', search' : ''}, suggest` };
   }
 
   /** reviewMode:'suggest' 的写入：只入队 memory/user/key，project/daily 直写。 */
@@ -478,6 +482,41 @@ export function toolDefinition({
     }
   }
 
+  /** 0.11.0：检索合并进 memory 工具（原 memory_search 独立工具已下线，省一份 schema 开销）。 */
+  function searchAction(input) {
+    if (!searchEnabled) return { success: false, error: "action 'search' is disabled in this profile" };
+    const query = String(input.query ?? '').trim();
+    if (!query) return { success: false, error: 'query is required (2-5 distinctive words).' };
+    let target;
+    if (input.target !== undefined && input.target !== null && input.target !== '') {
+      try {
+        store.assertTarget(input.target);
+      } catch (err) {
+        return failureResult(err);
+      }
+      target = input.target;
+    }
+    const limit = input.limit === undefined ? 5 : Number(input.limit);
+    if (!Number.isFinite(limit) || limit < 1 || limit > 20) {
+      return { success: false, error: 'limit must be an integer between 1 and 20.' };
+    }
+    try {
+      const matches = searchMemory(store, query, { target, limit });
+      return {
+        success: true,
+        query,
+        target: target ?? null,
+        count: matches.length,
+        matches,
+        note: matches.length
+          ? 'Read-only search result. Use the memory tool (add/patch) if something needs updating.'
+          : 'No match. Try fewer or different words, or omit target to search every track.',
+      };
+    } catch (err) {
+      return failureResult(err);
+    }
+  }
+
   return {
     name: 'memory',
     description: DESCRIPTION,
@@ -492,6 +531,7 @@ export function toolDefinition({
       const input = args ?? {};
       try {
         const action = input.action;
+        if (action === 'search') return searchAction(input);
         if (action === 'suggest') return suggestAction(input, exec);
         if (action === 'list_pending' || action === 'apply_pending' || action === 'discard_pending') {
           return applyPending(input);
@@ -504,12 +544,12 @@ export function toolDefinition({
           return {
             success: false,
             error:
-              "Missing required parameter: provide 'action' (add/patch/remove/suggest) or 'operations' (batch " +
+              "Missing required parameter: provide 'action' (add/patch/remove/search/suggest) or 'operations' (batch " +
               'list). Got neither.',
           };
         }
         if (action && action !== 'add' && action !== 'patch' && action !== 'remove') {
-          return { success: false, error: `Unknown action '${action}'. Use: add, patch, remove, suggest` };
+          return { success: false, error: `Unknown action '${action}'. Use: add, patch, remove${searchEnabled ? ', search' : ''}, suggest` };
         }
 
         const unattended = isReviewSession(sessionIdFromExec(exec));

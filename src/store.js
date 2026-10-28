@@ -225,6 +225,7 @@ export class MemoryStore {
     onWrite,
     threatScan = true,
     entryCharLimit = 200,
+    logEntryCharLimit = 600,
     addSimilarityLimit = 0.75,
     budgetGatePercent = 85,
   } = {}) {
@@ -250,8 +251,28 @@ export class MemoryStore {
     this.threatScan = threatScan !== false;
     // 0.10.0：写入门（选择性）。只在单条 add 上生效，batch 是补救通道。
     this.entryCharLimit = Number(entryCharLimit) > 0 ? Number(entryCharLimit) : 0;
+    this.logEntryCharLimit = Number(logEntryCharLimit) > 0 ? Number(logEntryCharLimit) : 0;
     this.addSimilarityLimit = Number(addSimilarityLimit) > 0 ? Number(addSimilarityLimit) : 0;
     this.budgetGatePercent = Number(budgetGatePercent) > 0 ? Number(budgetGatePercent) : 0;
+  }
+
+  /** 0.11.0：每条字符上限按轨取值——project/daily 是日志轨，允许更长的流水条目。 */
+  entryLimitFor(target) {
+    return target === 'project' || target === 'daily' ? this.logEntryCharLimit : this.entryCharLimit;
+  }
+
+  /** 0.11.0：错误 payload 只回最近几条（默认 3），避免整库回显浪费上下文。 */
+  currentPreview(entries, max = 3) {
+    const list = Array.isArray(entries) ? entries : [];
+    const preview = { current_entries: list.slice(0, max), entry_count: list.length };
+    if (list.length > max) preview.entries_truncated = list.length - max;
+    return preview;
+  }
+
+  /** 0.11.0：工具回显的条目/片段截断（写入日志仍存全文）。 */
+  clipEntry(value, max = 160) {
+    const textValue = typeof value === 'string' ? value : value == null ? '' : String(value);
+    return textValue.length > max ? `${textValue.slice(0, max)}…` : textValue;
   }
 
   /** 所有写入口的统一内容校验：§ 分隔符 + 提示注入（可选）。 */
@@ -517,7 +538,7 @@ export class MemoryStore {
     return new MemoryError(message, {
       success: false,
       target,
-      current_entries: [...entries],
+      ...this.currentPreview(entries),
       usage: this.usageShort(target),
     });
   }
@@ -569,29 +590,33 @@ export class MemoryStore {
     this.checkContent(value, target);
     const current = this.entries(target);
     if (current.includes(value)) return this.respond(target, 'Entry already exists (no duplicate added).');
-    if (this.entryCharLimit > 0 && value.length > this.entryCharLimit) {
+    const perEntry = this.entryLimitFor(target);
+    const isLog = target === 'project' || target === 'daily';
+    if (perEntry > 0 && value.length > perEntry) {
+      const hint = isLog
+        ? 'Split it: one add per turn or per day, and patch the same entry as the day goes on.'
+        : "Write ONE fact per entry: split this into several add calls, or put the log-like detail in target='project' / target='daily'.";
       throw new MemoryError(
-        `Entry is ${value.length} chars; the per-entry limit is ${this.entryCharLimit} chars. ` +
-          'Write ONE fact per entry: split this into several add calls, or put the log-like detail in ' +
-          "target='project' / target='daily'.",
-        { success: false, target, current_entries: [...current], usage: this.usageShort(target) },
+        `Entry is ${value.length} chars; the per-entry limit for '${target}' is ${perEntry} chars. ${hint}`,
+        { success: false, target, ...this.currentPreview(current), usage: this.usageShort(target) },
       );
     }
-    const nearest = this.nearestEntry(target, value);
-    if (this.addSimilarityLimit > 0 && nearest && nearest.score >= this.addSimilarityLimit) {
+    // 日志轨天生彼此相似（同一天的多次进展），不做近似重复拦截。
+    const nearest = isLog ? undefined : this.nearestEntry(target, value);
+    if (!isLog && this.addSimilarityLimit > 0 && nearest && nearest.score >= this.addSimilarityLimit) {
       const preview = nearest.entry.length > 120 ? `${nearest.entry.slice(0, 120)}...` : nearest.entry;
       throw new MemoryError(
         `Not added: an existing ${target} entry is already ${Math.round(nearest.score * 100)}% similar ` +
           '(near-duplicates are rejected). UPDATE that entry with patch instead: old_text = a unique span of it, ' +
           'content = the merged text. Existing entry: "' + preview + '"',
-        { success: false, target, current_entries: [...current], usage: this.usageShort(target) },
+        { success: false, target, ...this.currentPreview(current), usage: this.usageShort(target) },
       );
     }
     this.write(target, (entries) => {
       const next = [...entries, value];
       const limit = this.limit(target);
       const total = this.serialize(next).length;
-      if (this.budgetGatePercent > 0 && total <= limit) {
+      if (!isLog && this.budgetGatePercent > 0 && total <= limit) {
         const percent = Math.round((total / limit) * 100);
         if (percent > this.budgetGatePercent) {
           throw new MemoryError(
@@ -599,7 +624,7 @@ export class MemoryStore {
               `${this.budgetGatePercent}% gate. Make room first in ONE 'operations' batch: patch stale or overly long ` +
               'entries (see current_entries below) and add this entry in the same call — the limit is checked only on ' +
               'the batch result.',
-            { success: false, target, current_entries: [...entries], usage: this.usageShort(target) },
+            { success: false, target, ...this.currentPreview(entries), usage: this.usageShort(target) },
           );
         }
       }
@@ -627,7 +652,7 @@ export class MemoryStore {
     if (!needle) {
       throw new MemoryError(
         "'patch' needs old_text — a short unique substring of the entry. None was provided.",
-        { success: false, target, current_entries: [...this.entries(target)], usage: this.usageShort(target) },
+        { success: false, target, ...this.currentPreview(this.entries(target)), usage: this.usageShort(target) },
       );
     }
     const value = text(newText);
@@ -636,6 +661,7 @@ export class MemoryStore {
     }
     this.checkContent(value, target);
     let extra = {};
+    let fullBefore, fullAfter;
     this.write(target, (entries) => {
       const idx = this.locateIn(entries, needle, 'patch', matchedEntry);
       const before = entries[idx];
@@ -659,18 +685,20 @@ export class MemoryStore {
             'stale or less important entries to make room (see current_entries below), then retry — all in this turn.',
         );
       }
-      extra = { patched_entry_before: before, patched_entry_after: outcome.patched };
+      fullBefore = before;
+      fullAfter = outcome.patched;
+      extra = { patched_entry_before: this.clipEntry(before), patched_entry_after: this.clipEntry(outcome.patched) };
       return { entries: next, extra, message: 'Entry patched.' };
     });
     this.logWrite(source, {
       action: 'patch',
       target,
-      before: extra.patched_entry_before,
-      after: extra.patched_entry_after,
+      before: fullBefore,
+      after: fullAfter,
       old_text: needle,
       content: value,
     });
-    const warnings = this.similarWarnings(target, extra.patched_entry_after);
+    const warnings = this.similarWarnings(target, fullAfter);
     if (warnings.length) extra = { ...extra, warnings };
     return this.respond(target, 'Entry patched.', extra);
   }
@@ -712,7 +740,7 @@ export class MemoryStore {
       old_text: needle,
       content: value,
     });
-    return this.respond(target, 'Entry replaced.', { replaced_entry: previous });
+    return this.respond(target, 'Entry replaced.', { replaced_entry: this.clipEntry(previous) });
   }
 
   remove(target, oldText, matchedEntry) {
@@ -733,7 +761,7 @@ export class MemoryStore {
       after: null,
       old_text: needle,
     });
-    return this.respond(target, 'Entry removed.', { removed_entry: removed });
+    return this.respond(target, 'Entry removed.', { removed_entry: this.clipEntry(removed) });
   }
 
   /** 走一遍 batch 的 op 序列（不落盘）；返回 { entries: 结果数组, matched, produced }。 */
@@ -848,15 +876,18 @@ export class MemoryStore {
       const act = rawOp && typeof rawOp === 'object' ? rawOp.action : undefined;
       const previous = matched[i];
       if (previous == null) return;
-      if (act === 'replace') replaced[i + 1] = previous;
-      else if (act === 'remove') removed[i + 1] = previous;
-      else if (act === 'patch') patched[i + 1] = previous;
+      const shown = this.clipEntry(previous);
+      if (act === 'replace') replaced[i + 1] = shown;
+      else if (act === 'remove') removed[i + 1] = shown;
+      else if (act === 'patch') patched[i + 1] = shown;
     });
     const extra = {};
     if (Object.keys(replaced).length) extra.replaced_entries = replaced;
     if (Object.keys(patched).length) {
       extra.patched_entries = patched;
-      extra.patched_entries_after = Object.fromEntries(produced);
+      extra.patched_entries_after = Object.fromEntries(
+        [...produced].map(([index, entry]) => [index, this.clipEntry(entry)]),
+      );
     }
     if (Object.keys(removed).length) extra.removed_entries = removed;
     return extra;

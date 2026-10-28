@@ -294,7 +294,7 @@ test('0.10.0 写入门：单条超长被拒（提示 project/daily）', () => {
   const store = freshStore({ entryCharLimit: 40 });
   assert.throws(
     () => store.add('memory', 'x'.repeat(41)),
-    /per-entry limit is 40 chars.*target='project'/,
+    /per-entry limit for 'memory' is 40 chars.*target='project'/,
   );
   assert.deepEqual(store.entries('memory'), []);
 });
@@ -336,4 +336,48 @@ test('0.10.0 写入门：addSimilarityLimit=0 关闭近似拦截，entryCharLimi
   store.add('memory', 'x'.repeat(500));
   const res = store.add('memory', 'x'.repeat(500) + ' tail');
   assert.equal(res.success, true);
+});
+
+test('0.11.0 日志轨豁免：project/daily 允许长条目、允许近似重复', () => {
+  const store = freshStore({
+    targets: ['memory', 'user', 'project', 'daily'],
+    files: { project: 'PROJECT.md', daily: 'DAILY.md' },
+  });
+  const long = 'p'.repeat(500); // 普通轨 200 字门会拒，日志轨默认 600 放行
+  assert.equal(store.add('project', long).success, true);
+  assert.equal(store.add('daily', '2026-10-27 收尾').success, true);
+  assert.equal(store.add('daily', '2026-10-27 收尾').success, true); // 无近似拦截，重复也放行
+  assert.equal(store.entries('project').length, 1);
+});
+
+test('0.11.0 日志轨仍有 600 字上限', () => {
+  const store = freshStore({
+    targets: ['memory', 'user', 'project', 'daily'],
+    files: { project: 'PROJECT.md', daily: 'DAILY.md' },
+  });
+  assert.throws(() => store.add('project', 'q'.repeat(601)), /per-entry limit for 'project' is 600 chars/);
+});
+
+test('0.11.0 输出截断：current_entries 最多 3 条并带 entry_count', () => {
+  const store = freshStore({ memoryCharLimit: 200, budgetGatePercent: 85, entryCharLimit: 0, addSimilarityLimit: 0 });
+  for (const tag of ['a', 'b', 'c', 'd']) store.add('memory', tag.padEnd(40, '-'));
+  let err;
+  try {
+    store.add('memory', 'e'.repeat(20));
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err && err.detail, 'should throw with detail');
+  assert.equal(err.detail.current_entries.length, 3);
+  assert.equal(err.detail.entry_count, 4);
+  assert.equal(err.detail.entries_truncated, 1);
+});
+
+test('0.11.0 输出截断：patched_entry_before 带省略号', () => {
+  const store = freshStore({ entryCharLimit: 0, addSimilarityLimit: 0, budgetGatePercent: 0 });
+  const whole = 'x'.repeat(300);
+  store.add('memory', whole);
+  const res = store.patch('memory', whole, 'y'.repeat(300));
+  assert.ok(res.patched_entry_before.length <= 161, `len=${res.patched_entry_before.length}`);
+  assert.match(res.patched_entry_before, /…$/);
 });
