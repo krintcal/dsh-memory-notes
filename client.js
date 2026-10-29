@@ -971,6 +971,149 @@ window.__ModuleLoader__.load({
 		const PANEL_ID = "memory-notes";
 		const PANEL_ORDER = 31;
 
+		// 宿主的 layout face（打开面板用）；宿主没提供时保持 null，dock 只显示状态。
+		let layoutFace = null;
+
+		const PLACEHOLDER_COMMANDS = /^\/(memory|记忆)(\s|$)/i;
+
+		function useMemoryStatus() {
+			const [status, setStatus] = react.useState({ pending: 0, suggestions: 0 });
+			react.useEffect(() => {
+				let alive = true;
+				const pull = async () => {
+					try {
+						const res = await fetch(API.state);
+						const data = await res.json();
+						if (!alive) return;
+						setStatus({
+							pending: Array.isArray(data.pending) ? data.pending.length : 0,
+							suggestions: Array.isArray(data.suggestions) ? data.suggestions.length : 0,
+						});
+					} catch {
+						/* 面板不可用就不显示徽标 */
+					}
+				};
+				void pull();
+				const timer = setInterval(pull, 20000);
+				const onFocus = () => void pull();
+				window.addEventListener("focus", onFocus);
+				return () => {
+					alive = false;
+					clearInterval(timer);
+					window.removeEventListener("focus", onFocus);
+				};
+			}, []);
+			return status;
+		}
+
+		/* 输入框下方的常驻入口：待确认数、命令提示与「打开面板」。 */
+		function MemoryDock(props) {
+			const status = useMemoryStatus();
+			let text = "";
+			try {
+				text = typeof props?.useInput === "function" ? props.useInput((state) => state?.text ?? "") : "";
+			} catch {
+				text = "";
+			}
+			const commandMode = typeof text === "string" && PLACEHOLDER_COMMANDS.test(text);
+			const inputActions = props?.inputActions;
+			const canClear =
+				typeof inputActions?.clear === "function" || typeof inputActions?.setText === "function";
+			const openPanel = () => {
+				try {
+					layoutFace?.selectPanel?.(PANEL_ID);
+				} catch {
+					/* 宿主没有 layout face 时忽略 */
+				}
+			};
+			const clearInput = () => {
+				try {
+					if (typeof inputActions?.clear === "function") {
+						inputActions.clear();
+						return;
+					}
+					inputActions?.setText?.("");
+				} catch {
+					/* 清空失败不影响输入框 */
+				}
+			};
+			const children = [h("span", { key: "label" }, "🧠 记忆")];
+			if (status.pending > 0) {
+				children.push(
+					h("span", { key: "pending", style: { color: "#b3261e", fontWeight: 600 } }, `· 待确认 ${status.pending}`),
+				);
+			}
+			if (commandMode) {
+				children.push(h("span", { key: "hint" }, "· 命令：打开面板 / 清空输入"));
+			}
+			children.push(
+				h("span", { key: "spacer", style: { flex: "1 1 auto" } }),
+				h("button", { key: "open", style: smallBtn, onClick: openPanel }, "打开面板"),
+			);
+			if (commandMode && canClear) {
+				children.push(h("button", { key: "clear", style: smallBtn, onClick: clearInput }, "清空输入"));
+			}
+			return h(
+				"div",
+				{
+					"data-dsh-memory-notes-dock": "",
+					style: { display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "#6b7280", padding: "2px 2px" },
+				},
+				children,
+			);
+		}
+
+		/* 侧栏折叠时展开按钮里的红点。 */
+		function MemoryBadge() {
+			const status = useMemoryStatus();
+			if (!status.pending) return null;
+			return h("span", {
+				title: `${status.pending} 条记忆待确认`,
+				style: { display: "inline-block", width: 6, height: 6, borderRadius: 3, background: "#b3261e" },
+			});
+		}
+
+		function registerMemoryEntrypoints(ctx) {
+			const slots = ctx.slots;
+			if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") return () => {};
+			const disposers = [];
+			try {
+				disposers.push(
+					slots.inject("conversation.composer.dock", () =>
+						slots.register(
+							{
+								name: "conversation.composer.dock",
+								id: "memory-notes-dock",
+								order: 40,
+								label: () => "记忆",
+							},
+							MemoryDock,
+						),
+					),
+				);
+			} catch {
+				/* 宿主没有该 slot 时跳过 */
+			}
+			try {
+				disposers.push(
+					slots.inject("sidebar.toggle.badge", () =>
+						slots.register({ name: "sidebar.toggle.badge" }, MemoryBadge),
+					),
+				);
+			} catch {
+				/* 宿主没有该 slot 时跳过 */
+			}
+			return () => {
+				for (const dispose of disposers.splice(0)) {
+					try {
+						dispose();
+					} catch {
+						/* 卸载失败不该影响宿主 */
+					}
+				}
+			};
+		}
+
 		function PanelIcon({ size }) {
 			return h(
 				"svg",
@@ -1059,9 +1202,19 @@ window.__ModuleLoader__.load({
 		function apply(ctx) {
 			const disposers = [];
 			try {
+				layoutFace = ctx.get?.("layout") ?? null;
+			} catch {
+				layoutFace = null;
+			}
+			try {
 				disposers.push(registerPanel(ctx));
 			} catch (err) {
 				console.warn("[dsh-memory-notes] panel registration failed:", err);
+			}
+			try {
+				disposers.push(registerMemoryEntrypoints(ctx));
+			} catch (err) {
+				console.warn("[dsh-memory-notes] composer entry registration failed:", err);
 			}
 			try {
 				disposers.push(registerToolViews(ctx));

@@ -96,8 +96,31 @@ test("client bundle registers panel and per-tool rows, and cleans them up", asyn
 		["memory", "skill_manage"],
 	);
 
+	const dock = registrations.find((entry) => entry.definition.name === "conversation.composer.dock");
+	assert.ok(dock, "conversation.composer.dock must be registered");
+	assert.equal(dock.definition.id, "memory-notes-dock");
+
+	const badge = registrations.find((entry) => entry.definition.name === "sidebar.toggle.badge");
+	assert.ok(badge, "sidebar.toggle.badge must be registered");
+	assert.equal(textOf(badge.component({})), "");
+
 	assert.equal(cleanups.length, 1);
 	assert.doesNotThrow(() => cleanups[0]());
+});
+
+test("输入框 dock 在命令模式下提示命令，缺省时只显示入口", async () => {
+	const bundle = await loadBundle();
+	const exportsObject = bundle.factory(requireStub(fakeReact()));
+	const registrations = [];
+	exportsObject.apply(fakeCtx(registrations, []));
+	const Dock = registrations.find((entry) => entry.definition.name === "conversation.composer.dock").component;
+
+	const commandText = textOf(Dock({ useInput: (selector) => selector({ text: "/memory pending" }) }));
+	assert.match(commandText, /记忆/);
+	assert.match(commandText, /命令/);
+
+	const plainText = textOf(Dock({}));
+	assert.match(plainText, /记忆/);
 });
 
 test("memory tool row renders add, patch, running and failure states", async () => {

@@ -159,7 +159,7 @@ export function reviewNoticeText(entry, mode = 'on') {
   if (entry?.key !== undefined) diff.key = entry.key;
   if (isEmptyDiff(diff)) return '🧠 记忆回顾完成，没有需要保存的内容';
   const summary = entry?.summary || summarizeDiff(diff);
-  const base = `🧠 记忆已更新 · ${summary}（详情见左侧栏「记忆」面板）`;
+  const base = `🧠 记忆已更新 · ${summary} · 在输入框上方「记忆」查看或确认`;
   if (mode !== 'verbose') return base;
   const lines = [];
   for (const key of ['memory', 'user', 'key']) {
