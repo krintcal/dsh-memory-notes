@@ -337,20 +337,25 @@ window.__ModuleLoader__.load({
 							h(
 								"div",
 								{ style: row },
+								item.stale
+									? null
+									: h(
+											"button",
+											{
+												style: primaryBtn,
+												disabled: busy,
+												onClick: () => onDecide({ id: item.id, decision: "apply" }),
+											},
+											"批准",
+										),
 								h(
 									"button",
 									{
-										style: primaryBtn,
-										disabled: busy || Boolean(item.stale),
-										title: item.stale ? item.stale_reason || "条目已变，这条提案无法再应用" : "",
-										onClick: () => onDecide({ id: item.id, decision: "apply" }),
+										style: item.stale ? primaryBtn : smallBtn,
+										disabled: busy,
+										onClick: () => onDecide({ id: item.id, decision: "discard" }),
 									},
-									"批准",
-								),
-								h(
-									"button",
-									{ style: smallBtn, disabled: busy, onClick: () => onDecide({ id: item.id, decision: "discard" }) },
-									"丢弃",
+									item.stale ? "丢弃这条过期提案" : "丢弃",
 								),
 							),
 						),

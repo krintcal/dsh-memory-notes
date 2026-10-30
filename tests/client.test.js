@@ -315,6 +315,31 @@ test("面板没有 review / 变更记录时隐藏这两个区块，只留同步�
 	assert.match(text, /同步/);
 });
 
+test("过期的 pending 不再渲染「批准」，只留「丢弃这条过期提案」", async () => {
+	const now = Date.now();
+	const text = await renderPanel(
+		panelState({
+			pending: [
+				{
+					id: "p-stale",
+					created_at: now,
+					target: "memory",
+					action: "batch",
+					operation_count: 2,
+					stale: true,
+					stale_reason: "条目自提案后已变：opencode 本机…",
+				},
+				{ id: "p-fresh", created_at: now, target: "memory", action: "patch", old_text: "old", content: "new" },
+			],
+		}),
+	);
+	assert.match(text, /丢弃这条过期提案/);
+	assert.match(text, /条目自提案后已变/);
+	const approveCount = (text.match(/批准/g) || []).length;
+	// one 批准 in the section description, one on the fresh record — none on the stale one
+	assert.equal(approveCount, 2, "only the fresh pending may offer 批准");
+});
+
 test("面板在 state 带 suggestions 时渲染建议区块与采纳/丢弃按钮", async () => {
 	const now = Date.now();
 	const text = await renderPanel(

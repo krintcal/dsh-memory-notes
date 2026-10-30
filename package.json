@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-notes",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "private": true,
   "type": "module",
   "description": "Hermes-style long-term memory for DeepSeek Harness: layered plain-text memory tracks, one memory tool, live runtime-context snapshot.",
