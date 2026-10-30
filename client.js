@@ -971,8 +971,9 @@ window.__ModuleLoader__.load({
 		const PANEL_ID = "memory-notes";
 		const PANEL_ORDER = 31;
 
-		// 宿主的 layout face（打开面板用）；宿主没提供时保持 null，dock 只显示状态。
+		// 宿主的 layout face（打开面板用）；apply 时取一次，取不到就在点击时再懒取。
 		let layoutFace = null;
+		let appCtx = null;
 
 		const PLACEHOLDER_COMMANDS = /^\/(memory|记忆)(\s|$)/i;
 
@@ -1021,9 +1022,10 @@ window.__ModuleLoader__.load({
 				typeof inputActions?.clear === "function" || typeof inputActions?.setText === "function";
 			const openPanel = () => {
 				try {
-					layoutFace?.selectPanel?.(PANEL_ID);
-				} catch {
-					/* 宿主没有 layout face 时忽略 */
+					const face = resolveLayoutFace();
+					face?.selectPanel?.(PANEL_ID);
+				} catch (err) {
+					console.warn("[dsh-memory-notes] cannot open the memory panel:", err);
 				}
 			};
 			const clearInput = () => {
@@ -1071,6 +1073,17 @@ window.__ModuleLoader__.load({
 				title: `${status.pending} 条记忆待确认`,
 				style: { display: "inline-block", width: 6, height: 6, borderRadius: 3, background: "#b3261e" },
 			});
+		}
+
+		/* layout 服务可能比我们晚就绪：点击时再解析一次，别把 null 缓存成永久结论。 */
+		function resolveLayoutFace() {
+			if (layoutFace) return layoutFace;
+			try {
+				layoutFace = appCtx?.layout ?? appCtx?.get?.("layout") ?? null;
+			} catch {
+				layoutFace = null;
+			}
+			return layoutFace;
 		}
 
 		function registerMemoryEntrypoints(ctx) {
@@ -1201,8 +1214,9 @@ window.__ModuleLoader__.load({
 
 		function apply(ctx) {
 			const disposers = [];
+			appCtx = ctx;
 			try {
-				layoutFace = ctx.get?.("layout") ?? null;
+				layoutFace = ctx.layout ?? ctx.get?.("layout") ?? null;
 			} catch {
 				layoutFace = null;
 			}
@@ -1238,7 +1252,7 @@ window.__ModuleLoader__.load({
 		}
 
 		exports.apply = apply;
-		exports.inject = ["slots"];
+		exports.inject = ["slots", "layout"];
 		return module.exports;
 	},
 });

@@ -46,7 +46,7 @@ async function loadBundle() {
 	return cachedBundle;
 }
 
-function fakeCtx(registrations, cleanups) {
+function fakeCtx(registrations, cleanups, extra = {}) {
 	const ctx = {
 		slots: {
 			inject: (_name, fn) => fn(),
@@ -59,6 +59,7 @@ function fakeCtx(registrations, cleanups) {
 			cleanups.push(fn());
 		},
 		get: () => undefined,
+		...extra,
 	};
 	return ctx;
 }
@@ -77,6 +78,7 @@ test("client bundle registers panel and per-tool rows, and cleans them up", asyn
 
 	const exportsObject = bundle.factory(requireStub(fakeReact()));
 	assert.equal(exportsObject.inject[0], "slots");
+	assert.ok(exportsObject.inject.includes("layout"), "client must inject the layout service to open the panel");
 
 	const registrations = [];
 	const cleanups = [];
@@ -121,6 +123,25 @@ test("输入框 dock 在命令模式下提示命令，缺省时只显示入口",
 
 	const plainText = textOf(Dock({}));
 	assert.match(plainText, /记忆/);
+});
+
+test("dock 的「打开面板」调用 layout.selectPanel，且懒解析晚到的 layout 服务", async () => {
+	const bundle = await loadBundle();
+	const exportsObject = bundle.factory(requireStub(fakeReact()));
+	const calls = [];
+	const registrations = [];
+	const cleanups = [];
+	exportsObject.apply(
+		fakeCtx(registrations, cleanups, { layout: { selectPanel: (id) => calls.push(id) } }),
+	);
+	const Dock = registrations.find((entry) => entry.definition.name === "conversation.composer.dock").component;
+
+	const row = Dock({});
+	const button = row.children.find((child) => child.type === "button" && textOf(child) === "打开面板");
+	assert.ok(button, "dock must render the 打开面板 button");
+	button.props.onClick();
+	assert.deepEqual(calls, ["memory-notes"]);
+	assert.doesNotThrow(() => cleanups[0]());
 });
 
 test("memory tool row renders add, patch, running and failure states", async () => {

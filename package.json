@@ -1,39 +1,39 @@
 {
-  "name": "dsh-memory-notes",
-  "version": "0.12.0",
-  "private": true,
-  "type": "module",
-  "description": "Hermes-style long-term memory for DeepSeek Harness: layered plain-text memory tracks, one memory tool, live runtime-context snapshot.",
-  "exports": {
-    ".": "./index.js",
-    "./client": "./client.js",
-    "./locale/*.json": "./locale/*.json",
-    "./icon": "./icon.svg"
-  },
-  "files": [
-    "index.js",
-    "client.js",
-    "src/*.js",
-    "cordis.patch.yml",
-    "locale/*.json",
-    "icon.svg",
-    "README.md"
-  ],
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "inject": [
-        "@deepseek-ai/dsh-client-ui-renderer"
-      ],
-      "platform": "web"
-    }
-  },
-  "scripts": {
-    "test": "node --test tests/*.test.js",
-    "sync": "node scripts/sync-to-profile.mjs"
-  },
-  "main": "index.js"
+	"name": "dsh-memory-notes",
+	"version": "0.12.1",
+	"private": true,
+	"type": "module",
+	"description": "Hermes-style long-term memory for DeepSeek Harness: layered plain-text memory tracks, one memory tool, live runtime-context snapshot.",
+	"exports": {
+		".": "./index.js",
+		"./client": "./client.js",
+		"./locale/*.json": "./locale/*.json",
+		"./icon": "./icon.svg"
+	},
+	"files": [
+		"index.js",
+		"client.js",
+		"src/*.js",
+		"cordis.patch.yml",
+		"locale/*.json",
+		"icon.svg",
+		"README.md"
+	],
+	"dsh": {
+		"bundle": {
+			"patch": "./cordis.patch.yml"
+		},
+		"client": {
+			"inject": [
+				"@deepseek-ai/dsh-client-ui-renderer",
+				"@deepseek-ai/dsh-client-ui-layout"
+			],
+			"platform": "web"
+		}
+	},
+	"scripts": {
+		"test": "node --test tests/*.test.js",
+		"sync": "node scripts/sync-to-profile.mjs"
+	},
+	"main": "index.js"
 }
-
