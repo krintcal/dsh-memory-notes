@@ -583,7 +583,8 @@ export class MemoryStore {
     });
   }
 
-  add(target, content) {
+  add(target, content, options = {}) {
+    const skipGates = Boolean(options && options.skipGates);
     const source = this.takeSource();
     const value = text(content).trim();
     if (!value) throw new MemoryError('Content cannot be empty.', { success: false, target });
@@ -592,7 +593,7 @@ export class MemoryStore {
     if (current.includes(value)) return this.respond(target, 'Entry already exists (no duplicate added).');
     const perEntry = this.entryLimitFor(target);
     const isLog = target === 'project' || target === 'daily';
-    if (perEntry > 0 && value.length > perEntry) {
+    if (!skipGates && perEntry > 0 && value.length > perEntry) {
       const hint = isLog
         ? 'Split it: one add per turn or per day, and patch the same entry as the day goes on.'
         : "Write ONE fact per entry: split this into several add calls, or put the log-like detail in target='project' / target='daily'.";
@@ -603,7 +604,7 @@ export class MemoryStore {
     }
     // 日志轨天生彼此相似（同一天的多次进展），不做近似重复拦截。
     const nearest = isLog ? undefined : this.nearestEntry(target, value);
-    if (!isLog && this.addSimilarityLimit > 0 && nearest && nearest.score >= this.addSimilarityLimit) {
+    if (!isLog && !skipGates && this.addSimilarityLimit > 0 && nearest && nearest.score >= this.addSimilarityLimit) {
       const preview = nearest.entry.length > 120 ? `${nearest.entry.slice(0, 120)}...` : nearest.entry;
       throw new MemoryError(
         `Not added: an existing ${target} entry is already ${Math.round(nearest.score * 100)}% similar ` +
@@ -613,10 +614,11 @@ export class MemoryStore {
       );
     }
     this.write(target, (entries) => {
-      const next = [...entries, value];
+      const at = Number.isInteger(options && options.position) ? options.position : -1;
+      const next = at >= 0 && at <= entries.length ? [...entries.slice(0, at), value, ...entries.slice(at)] : [...entries, value];
       const limit = this.limit(target);
       const total = this.serialize(next).length;
-      if (!isLog && this.budgetGatePercent > 0 && total <= limit) {
+      if (!isLog && !skipGates && this.budgetGatePercent > 0 && total <= limit) {
         const percent = Math.round((total / limit) * 100);
         if (percent > this.budgetGatePercent) {
           throw new MemoryError(

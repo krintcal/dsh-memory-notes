@@ -360,3 +360,324 @@ test("面板 suggestions 为空时不渲染建议区块", async () => {
 	const text = await renderPanel(panelState());
 	assert.doesNotMatch(text, /采纳/);
 });
+
+/* ---------------------- 0.14.0：交互质量 P0 ---------------------- */
+
+function expandTree(node) {
+	if (node === null || node === undefined || node === false) return null;
+	if (Array.isArray(node)) return node.map(expandTree).filter(Boolean);
+	if (typeof node === "object" && typeof node.type === "function") return expandTree(node.type(node.props));
+	if (typeof node === "object" && Array.isArray(node.children)) {
+		return { ...node, children: node.children.map(expandTree).filter(Boolean) };
+	}
+	return node;
+}
+
+function collectNodes(node, predicate, out = []) {
+	if (node === null || node === undefined || node === false) return out;
+	if (Array.isArray(node)) {
+		for (const child of node) collectNodes(child, predicate, out);
+		return out;
+	}
+	if (typeof node === "object") {
+		if (predicate(node)) out.push(node);
+		if (Array.isArray(node.children)) for (const child of node.children) collectNodes(child, predicate, out);
+	}
+	return out;
+}
+
+async function renderPanelTree(state) {
+	const bundle = await loadBundle();
+	const exportsObject = bundle.factory(requireStub(panelReact([state, "", false, ""])));
+	const registrations = [];
+	exportsObject.apply(fakeCtx(registrations, []));
+	const main = registrations.find((entry) => entry.definition.name === "main");
+	return expandTree(main.component());
+}
+
+test("空态显示对应轨道的 hint，而不是「还没有条目」", async () => {
+	const text = await renderPanel(panelState());
+	assert.match(text, /记环境事实与踩坑结论/);
+	assert.match(text, /pnpm 12\.x 与桌面端不匹配/);
+	assert.doesNotMatch(text, /还没有条目/);
+});
+
+test("轨道标签页暴露 tablist/tab、aria-selected 与 roving tabIndex", async () => {
+	const tree = await renderPanelTree(panelState());
+	const tablist = collectNodes(tree, (node) => node.props && node.props.role === "tablist")[0];
+	assert.ok(tablist, "tabs container must have role=tablist");
+	const tabs = collectNodes(tablist, (node) => node.props && node.props.role === "tab");
+	assert.equal(tabs.length, 2);
+	assert.equal(tabs[0].props["aria-selected"], true);
+	assert.equal(tabs[0].props.tabIndex, 0);
+	assert.equal(tabs[1].props["aria-selected"], false);
+	assert.equal(tabs[1].props.tabIndex, -1);
+});
+
+test("条目文本可键盘进入编辑，新增输入框有 aria-label", async () => {
+	const tree = await renderPanelTree(
+		panelState({
+			targets: {
+				memory: { entries: ["alpha"], used: 5, limit: 2200, percent: 0, usage: "0% — 5/2,200 chars" },
+				user: { entries: [], used: 0, limit: 1375, percent: 0, usage: "0% — 0/1,375 chars" },
+			},
+		}),
+	);
+	const editable = collectNodes(
+		tree,
+		(node) => node.props && node.props.role === "button" && node.props["aria-label"] === "编辑这条记忆",
+	);
+	assert.ok(editable.length >= 1, "entry text must expose a keyboard-editable button");
+	assert.equal(editable[0].props.tabIndex, 0);
+	assert.equal(typeof editable[0].props.onKeyDown, "function");
+	const addBox = collectNodes(tree, (node) => node.props && node.props["aria-label"] === "新增记忆条目")[0];
+	assert.ok(addBox, "add entry textarea must have an aria-label");
+	assert.equal(addBox.type, "textarea");
+});
+
+function expandUntil(node, stopName) {
+	if (node === null || node === undefined || node === false) return null;
+	if (Array.isArray(node)) return node.map((child) => expandUntil(child, stopName)).filter(Boolean);
+	if (typeof node === "object" && typeof node.type === "function") {
+		if (node.type.name === stopName) return node;
+		return expandUntil(node.type(node.props), stopName);
+	}
+	if (typeof node === "object" && Array.isArray(node.children)) {
+		return { ...node, children: node.children.map((child) => expandUntil(child, stopName)).filter(Boolean) };
+	}
+	return node;
+}
+
+test("条目 key 以内容为准，重复内容追加出现序号", async () => {
+	const bundle = await loadBundle();
+	const exportsObject = bundle.factory(
+		requireStub(
+			panelReact([
+				panelState({
+					targets: {
+						memory: { entries: ["dup", "dup", "unique"], used: 9, limit: 2200, percent: 0, usage: "0% — 9/2,200 chars" },
+						user: { entries: [], used: 0, limit: 1375, percent: 0, usage: "0% — 0/1,375 chars" },
+					},
+				}),
+				"",
+				false,
+				"",
+			]),
+		),
+	);
+	const registrations = [];
+	exportsObject.apply(fakeCtx(registrations, []));
+	const main = registrations.find((entry) => entry.definition.name === "main");
+	const cards = collectNodes(
+		expandUntil(main.component(), "EntryCard"),
+		(node) => typeof node.type === "function" && node.type.name === "EntryCard",
+	);
+	assert.deepEqual(
+		cards.map((card) => card.props.key),
+		["memory:dup", "memory:dup:1", "memory:unique"],
+	);
+});
+
+test("按条目 busy：只有 key 匹配的条目被禁用，其他条目仍可编辑", async () => {
+	const bundle = await loadBundle();
+	const exportsObject = bundle.factory(
+		requireStub(
+			panelReact([
+				panelState({
+					targets: {
+						memory: { entries: ["alpha", "beta"], used: 10, limit: 2200, percent: 0, usage: "0% — 10/2,200 chars" },
+						user: { entries: [], used: 0, limit: 1375, percent: 0, usage: "0% — 0/1,375 chars" },
+					},
+				}),
+				"",
+				false,
+				"memory:alpha",
+			]),
+		),
+	);
+	const registrations = [];
+	exportsObject.apply(fakeCtx(registrations, []));
+	const main = registrations.find((entry) => entry.definition.name === "main");
+	const cards = collectNodes(
+		expandUntil(main.component(), "EntryCard"),
+		(node) => typeof node.type === "function" && node.type.name === "EntryCard",
+	);
+	const byEntry = Object.fromEntries(cards.map((card) => [card.props.entry, card.props]));
+	assert.equal(byEntry.alpha.busy, true);
+	assert.equal(byEntry.beta.busy, false);
+});
+
+/* ---------------------- 0.14.0：交互质量 P1 ---------------------- */
+
+function panelHookValues(state, overrides = {}) {
+	return [
+		state,
+		overrides.error ?? "",
+		overrides.busy ?? false,
+		overrides.busyKey ?? "",
+		overrides.notice ?? "",
+		overrides.activeTrack ?? null,
+		overrides.editingCount ?? 0,
+		overrides.savedKey ?? "",
+		overrides.query ?? "",
+		overrides.searchState ?? { status: "", results: [], error: "" },
+		overrides.undoEntry ?? null,
+		overrides.undoState ?? "",
+	];
+}
+
+async function renderPanelElement(values) {
+	const bundle = await loadBundle();
+	const exportsObject = bundle.factory(requireStub(panelReact(values)));
+	const registrations = [];
+	exportsObject.apply(fakeCtx(registrations, []));
+	const main = registrations.find((entry) => entry.definition.name === "main");
+	assert.ok(main, "main panel must be registered");
+	return main.component();
+}
+
+test("面板头部提供搜索框与搜索按钮，空输入时按钮禁用", async () => {
+	const tree = expandTree(await renderPanelElement(panelHookValues(panelState())));
+	const input = collectNodes(tree, (node) => node.type === "input")[0];
+	assert.ok(input, "header must render a search input");
+	assert.equal(input.props["aria-label"], "搜索记忆");
+	assert.equal(input.props.placeholder, "搜索五轨记忆…");
+	const button = collectNodes(tree, (node) => node.type === "button" && textOf(node) === "搜索")[0];
+	assert.ok(button, "header must render a 搜索 button");
+	assert.equal(button.props.disabled, true);
+});
+
+test("搜索结果显示在标签栏下方，按轨道标签 + 条目渲染并截断长条目", async () => {
+	const searchState = {
+		status: "done",
+		results: [
+			{ target: "memory", entry: "pnpm 12.x 与桌面端不匹配", score: 2 },
+			{ target: "daily", entry: "d".repeat(200), score: 1 },
+		],
+		error: "",
+	};
+	const tree = expandTree(
+		await renderPanelElement(panelHookValues(panelState(), { query: "pnpm", searchState })),
+	);
+	const text = textOf(tree);
+	assert.match(text, /记忆 · pnpm 12\.x 与桌面端不匹配/);
+	assert.match(text, /每日 · d{100}/);
+	assert.match(text, /…/);
+	assert.doesNotMatch(text, /没有匹配的条目/);
+});
+
+test("搜索无结果与请求失败分别给出空态和红字原因", async () => {
+	const emptyTree = expandTree(
+		await renderPanelElement(
+			panelHookValues(panelState(), {
+				query: "nothing",
+				searchState: { status: "done", results: [], error: "" },
+			}),
+		),
+	);
+	assert.match(textOf(emptyTree), /没有匹配的条目。/);
+
+	const errorTree = expandTree(
+		await renderPanelElement(
+			panelHookValues(panelState(), {
+				query: "boom",
+				searchState: { status: "error", results: [], error: "检索服务挂了" },
+			}),
+		),
+	);
+	assert.match(textOf(errorTree), /检索服务挂了/);
+});
+
+test("pending 用 diff 风格展示删除行与新增行，批量 ops 也逐行展示", async () => {
+	const longOld = "o".repeat(300);
+	const text = await renderPanel(
+		panelState({
+			pending: [
+				{ id: "p-diff", target: "memory", action: "patch", old_text: longOld, content: "new fact" },
+				{
+					id: "p-batch",
+					target: "memory",
+					action: "batch",
+					operation_count: 2,
+					operations: [
+						{ action: "patch", old_text: "a", content: "b" },
+						{ action: "remove", old_text: "c" },
+					],
+				},
+			],
+		}),
+	);
+	assert.match(text, /− o{50}/);
+	assert.match(text, /\+ new fact/);
+	assert.match(text, /…/);
+	assert.match(text, /· patch/);
+	assert.match(text, /− a/);
+	assert.match(text, /\+ b/);
+	assert.match(text, /− c/);
+	assert.doesNotMatch(text, /old:/);
+	assert.doesNotMatch(text, /new:/);
+});
+
+test("删除成功后 TrackSection 回调 onDeleted，带轨道与原条目文本", async () => {
+	const element = await renderPanelElement(
+		panelHookValues(
+			panelState({
+				targets: {
+					memory: { entries: ["alpha"], used: 5, limit: 2200, percent: 0, usage: "0% — 5/2,200 chars" },
+					user: { entries: [], used: 0, limit: 1375, percent: 0, usage: "0% — 0/1,375 chars" },
+				},
+			}),
+		),
+	);
+	const trackNode = collectNodes(
+		element,
+		(node) => typeof node.type === "function" && node.type.name === "TrackSection",
+	)[0];
+	assert.ok(trackNode, "TrackSection must be rendered");
+	const deleted = [];
+	const rendered = trackNode.type({
+		...trackNode.props,
+		onWrite: async () => ({ ok: true }),
+		onDeleted: (payload) => deleted.push(payload),
+	});
+	const card = collectNodes(
+		expandUntil(rendered, "EntryCard"),
+		(node) => typeof node.type === "function" && node.type.name === "EntryCard",
+	)[0];
+	const result = await card.props.onRemove("alpha");
+	assert.deepEqual(result, { ok: true });
+	assert.deepEqual(deleted, [{ target: "memory", text: "alpha", position: 0 }]);
+});
+
+test("删除后底部悬浮提示「已删除 · 撤销」，撤销成功显示「已撤销」", async () => {
+	const pendingTree = expandTree(
+		await renderPanelElement(
+			panelHookValues(panelState(), { undoEntry: { target: "memory", text: "gone" } }),
+		),
+	);
+	const pendingText = textOf(pendingTree);
+	assert.match(pendingText, /已删除/);
+	assert.match(pendingText, /撤销/);
+	const undoButton = collectNodes(
+		pendingTree,
+		(node) => node.type === "button" && textOf(node) === "撤销",
+	)[0];
+	assert.ok(undoButton, "toast must render a 撤销 button");
+
+	const doneTree = expandTree(
+		await renderPanelElement(panelHookValues(panelState(), { undoState: "done" })),
+	);
+	assert.match(textOf(doneTree), /已撤销/);
+});
+
+test("撤销失败时在 toast 里显示红字原因", async () => {
+	const tree = expandTree(
+		await renderPanelElement(
+			panelHookValues(panelState(), {
+				undoEntry: { target: "memory", text: "gone" },
+				undoState: "写回失败：磁盘只读",
+			}),
+		),
+	);
+	assert.match(textOf(tree), /写回失败：磁盘只读/);
+});

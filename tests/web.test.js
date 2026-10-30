@@ -273,12 +273,13 @@ test('registerWebPanel 通过 ctx.effect 注册路由，dispose 时调用每个 
 
   registerWebPanel(ctx, { store, pending });
   assert.match(String(effectLabel), /web routes/);
-  assert.equal(registered.length, 5);
+  assert.equal(registered.length, 6);
   assert.equal(disposed.length, 0);
 
   cleanup();
   assert.deepEqual(disposed.sort(), [
     '/api/dsh-memory-notes/pending',
+    '/api/dsh-memory-notes/search',
     '/api/dsh-memory-notes/state',
     '/api/dsh-memory-notes/suggestions',
     '/api/dsh-memory-notes/sync',
@@ -438,7 +439,7 @@ test('registerWebPanel 无 connection 服务时 fail-open（不阻断）', async
     },
   };
   registerWebPanel(ctx, { store, pending });
-  assert.equal(registered.length, 5);
+  assert.equal(registered.length, 6);
   const stateRoute = registered.find((route) => route.path.endsWith('/state'));
   const { res, payload } = await callRoute(stateRoute, rawRequest({ method: 'GET' }));
   assert.equal(res.statusCode, 200);
@@ -529,4 +530,45 @@ test('state 带 conflicts：高度相似的两条并列时给出提示', () => {
   assert.equal(pair.target, 'memory');
   assert.equal(pair.similarity >= 0.8, true);
   assert.match(pair.a + pair.b, /config lives in dsh home/);
+});
+
+/* ------------------------- 0.14.0：只读检索接口 ------------------------- */
+
+test('search：命中条目带 target，空查询与不存在的 target 过滤返回空', () => {
+  const { store, api } = fixture();
+  store.add('memory', 'alpha beta');
+
+  const hit = api.search({ q: 'alpha' });
+  assert.equal(hit.ok, true);
+  assert.equal(hit.results[0].target, 'memory');
+  assert.equal(hit.results[0].entry, 'alpha beta');
+  assert.deepEqual(api.search({ q: '   ' }).results, []);
+  assert.deepEqual(api.search({ q: 'alpha', target: 'user' }).results, []);
+});
+
+test('GET /search 返回检索结果，POST 返回 405', async () => {
+  const { store, api } = fixture();
+  store.add('memory', 'alpha beta');
+  const build = (authorize) =>
+    buildRoutes(api, { authorize }).find((item) => item.path === '/api/dsh-memory-notes/search');
+  const route = build(() => false);
+  assert.ok(route, 'search route exists');
+
+  const getRequest = rawRequest({ method: 'GET' });
+  getRequest.url = '/api/dsh-memory-notes/search?q=alpha';
+  const found = await callRoute(route, getRequest);
+  assert.equal(found.res.statusCode, 200);
+  assert.equal(found.payload.ok, true);
+  assert.equal(found.payload.results[0].target, 'memory');
+
+  const postRequest = rawRequest({
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  });
+  postRequest.url = '/api/dsh-memory-notes/search?q=alpha';
+  const rejected = await callRoute(route, postRequest);
+  assert.equal(rejected.res.statusCode, 405);
+  assert.equal(rejected.payload.ok, false);
+  assert.match(rejected.payload.error, /GET only/);
 });

@@ -323,6 +323,10 @@ test('0.10.0 写入门：预算超过 85% 时单条 add 被拒，batch 可成', 
   store.add('memory', 'a'.repeat(40)); // 40/100
   store.add('memory', 'b'.repeat(40)); // 83/100 = 83%
   assert.throws(() => store.add('memory', 'ccc'), /above the 85% gate/);
+  // 撤销删除（restore）跳过预算/近似门，但仍受硬上限约束
+  const restored = store.add('memory', 'ccc', { skipGates: true });
+  assert.equal(restored.success, true);
+  store.remove('memory', 'ccc');
   const res = store.applyBatch('memory', [
     { action: 'remove', old_text: 'aaaa' },
     { action: 'add', content: 'ccc' },

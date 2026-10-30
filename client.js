@@ -18,6 +18,7 @@ window.__ModuleLoader__.load({
 			pending: "api/dsh-memory-notes/pending",
 			suggestions: "api/dsh-memory-notes/suggestions",
 			sync: "api/dsh-memory-notes/sync",
+			search: "api/dsh-memory-notes/search",
 		};
 
 		async function fetchJson(url, body) {
@@ -69,6 +70,32 @@ window.__ModuleLoader__.load({
 			background: "rgba(127,127,127,0.16)",
 		};
 		const dangerBtn = { ...smallBtn, border: "1px solid rgba(179,38,30,0.7)", color: "#b3261e" };
+		const focusRing = { outline: "2px solid currentColor", outlineOffset: "1px" };
+		const focusShadow = "0 0 0 2px currentColor";
+		function withFocus(props) {
+			const base = props || {};
+			return {
+				...base,
+				onFocus: (event) => {
+					const node = event && event.currentTarget;
+					if (node && node.style) {
+						node.style.boxShadow = focusShadow;
+						node.style.outline = focusRing.outline;
+						node.style.outlineOffset = focusRing.outlineOffset;
+					}
+					if (typeof base.onFocus === "function") base.onFocus(event);
+				},
+				onBlur: (event) => {
+					const node = event && event.currentTarget;
+					if (node && node.style) {
+						node.style.boxShadow = "";
+						node.style.outline = "";
+						node.style.outlineOffset = "";
+					}
+					if (typeof base.onBlur === "function") base.onBlur(event);
+				},
+			};
+		}
 		const textarea = {
 			width: "100%",
 			boxSizing: "border-box",
@@ -133,14 +160,116 @@ window.__ModuleLoader__.load({
 		const detailsSummary = { fontSize: "12px", opacity: 0.6, cursor: "pointer", userSelect: "none", marginBottom: "10px" };
 
 		const TRACK_META = [
-			{ key: "memory", label: "记忆", title: "MEMORY · 我的工作笔记" },
-			{ key: "user", label: "用户", title: "USER PROFILE · 用户是谁" },
-			{ key: "key", label: "关键", title: "KEY · 当前项目/分支要点" },
-			{ key: "project", label: "项目日志", title: "PROJECT · 项目日志" },
-			{ key: "daily", label: "每日", title: "DAILY · 每日日志" },
+			{
+				key: "memory",
+				label: "记忆",
+				title: "MEMORY · 我的工作笔记",
+				hint: "记环境事实与踩坑结论，例：『pnpm 12.x 与桌面端不匹配，要用运行时自带的 11.28.5』",
+			},
+			{
+				key: "user",
+				label: "用户",
+				title: "USER PROFILE · 用户是谁",
+				hint: "记用户偏好，例：『回答尽量简短』",
+			},
+			{
+				key: "key",
+				label: "关键",
+				title: "KEY · 当前项目/分支要点",
+				hint: "记当前项目/分支的关键决策，例：『这个分支先不升级 cordis，等宿主发版』",
+			},
+			{
+				key: "project",
+				label: "项目日志",
+				title: "PROJECT · 项目日志",
+				hint: "每回合一行进展（不注入上下文，靠 memory action:'search' 查），例：『0.14.0 面板交互 P0 完成』",
+			},
+			{
+				key: "daily",
+				label: "每日",
+				title: "DAILY · 每日日志",
+				hint: "当天小结（同上），例：『今天修完按条目 busy 与编辑期暂停轮询』",
+			},
 		];
 		const flatSection = { marginBottom: "16px" };
 		const itemBox = { padding: "8px 10px", borderRadius: "8px", marginBottom: "8px", background: "rgba(127,127,127,0.06)" };
+		const diffLine = (kind) => ({
+			...muted,
+			whiteSpace: "pre-wrap",
+			wordBreak: "break-word",
+			padding: "2px 6px",
+			marginTop: "2px",
+			borderRadius: "4px",
+			background: kind === "remove" ? "rgba(179,38,30,0.12)" : "rgba(46,125,50,0.14)",
+			color: kind === "remove" ? "#b3261e" : "#2e7d32",
+		});
+		const searchInput = {
+			font: "inherit",
+			fontSize: "12px",
+			padding: "4px 8px",
+			minWidth: "160px",
+			borderRadius: "7px",
+			border: "1px solid rgba(127,127,127,0.4)",
+			background: "transparent",
+			color: "inherit",
+			cursor: "text",
+		};
+		const searchResultRow = {
+			display: "block",
+			width: "100%",
+			boxSizing: "border-box",
+			textAlign: "left",
+			font: "inherit",
+			fontSize: "13px",
+			lineHeight: 1.5,
+			padding: "6px 8px",
+			border: "none",
+			borderBottom: "1px solid rgba(127,127,127,0.14)",
+			background: "transparent",
+			color: "inherit",
+			cursor: "pointer",
+			whiteSpace: "pre-wrap",
+			wordBreak: "break-word",
+		};
+		const toastBox = {
+			position: "fixed",
+			left: "50%",
+			bottom: "24px",
+			transform: "translateX(-50%)",
+			display: "flex",
+			alignItems: "center",
+			gap: "10px",
+			padding: "8px 14px",
+			borderRadius: "10px",
+			border: "1px solid rgba(127,127,127,0.45)",
+			background: "rgba(32,32,32,0.94)",
+			color: "#fff",
+			fontSize: "13px",
+			boxShadow: "0 6px 24px rgba(0,0,0,0.28)",
+			zIndex: 9999,
+		};
+		const toastBtn = { ...smallBtn, color: "inherit", border: "1px solid rgba(255,255,255,0.55)", padding: "2px 8px" };
+
+		function clipRaw(value, max) {
+			if (typeof value !== "string") return "";
+			return value.length > max ? `${value.slice(0, max)}…` : value;
+		}
+
+		function diffRows(oldText, newText, keyPrefix) {
+			const nodes = [];
+			if (typeof oldText === "string" && oldText !== "") {
+				nodes.push(h("div", { key: `${keyPrefix}:del`, style: diffLine("remove") }, `− ${clipRaw(oldText, 240)}`));
+			}
+			if (typeof newText === "string" && newText !== "") {
+				nodes.push(h("div", { key: `${keyPrefix}:add`, style: diffLine("add") }, `+ ${clipRaw(newText, 240)}`));
+			}
+			return nodes;
+		}
+
+		function trackLabel(key) {
+			const meta = TRACK_META.find((item) => item.key === key);
+			return meta ? meta.label : key;
+		}
 
 		function formatClock(value) {
 			const date = value instanceof Date ? value : new Date(value);
@@ -150,117 +279,257 @@ window.__ModuleLoader__.load({
 
 		/* ------------------------------- entry card ------------------------------ */
 
-		function EntryCard({ target, entry, index, busy, onSave, onRemove }) {
+		function EntryCard({ target, entry, index, busy, saved, onSave, onRemove, onEditingChange }) {
 			const [editing, setEditing] = react.useState(false);
 			const [text, setText] = react.useState(entry);
 			const [confirming, setConfirming] = react.useState(false);
+			const [saveState, setSaveState] = react.useState("");
 			react.useEffect(() => {
 				setText(entry);
 				setEditing(false);
+				setSaveState("");
 			}, [entry]);
+			react.useEffect(() => {
+				if (!editing) return undefined;
+				onEditingChange?.(1);
+				return () => onEditingChange?.(-1);
+			}, [editing, onEditingChange]);
 			react.useEffect(() => {
 				if (!confirming) return undefined;
 				const timer = setTimeout(() => setConfirming(false), 3000);
 				return () => clearTimeout(timer);
 			}, [confirming]);
+			react.useEffect(() => {
+				if (saveState !== "saved") return undefined;
+				const timer = setTimeout(() => setSaveState(""), 2000);
+				return () => clearTimeout(timer);
+			}, [saveState]);
+
+			const dirty = text !== entry;
+
+			const handleSave = async () => {
+				if (busy || !dirty) return;
+				setSaveState("saving");
+				try {
+					const result = await onSave(entry, text);
+					if (result && result.ok) setSaveState("saved");
+					else setSaveState((result && result.error) || "保存失败");
+				} catch (err) {
+					setSaveState(err && err.message ? err.message : String(err));
+				}
+			};
+
+			const handleRemove = async () => {
+				if (busy) return;
+				if (!confirming) {
+					setConfirming(true);
+					return;
+				}
+				setConfirming(false);
+				try {
+					const result = await onRemove(entry);
+					if (result && result.ok === false) setSaveState(result.error || "删除失败");
+				} catch (err) {
+					setSaveState(err && err.message ? err.message : String(err));
+				}
+			};
+
 			if (!editing) {
 				return h(
 					"div",
 					{ style: entryRow },
-					h("span", { style: entryText, title: entry, onClick: () => setEditing(true) }, entry),
-					h("button", { style: { ...ghostBtn, flex: "0 0 auto" }, disabled: busy, onClick: () => setEditing(true) }, "编辑"),
+					h(
+						"span",
+						withFocus({
+							style: entryText,
+							title: entry,
+							tabIndex: 0,
+							role: "button",
+							"aria-label": "编辑这条记忆",
+							onClick: () => setEditing(true),
+							onKeyDown: (event) => {
+								if (event.key === "Enter" || event.key === " ") {
+									event.preventDefault();
+									setEditing(true);
+								}
+							},
+						}),
+						entry,
+					),
+					saved ? h("span", { style: { ...muted, color: "#2e7d32", flex: "0 0 auto" } }, "已保存 ✓") : null,
+					h(
+						"button",
+						withFocus({
+							style: { ...ghostBtn, flex: "0 0 auto" },
+							disabled: busy,
+							"aria-label": "编辑这条记忆",
+							onClick: () => setEditing(true),
+						}),
+						"编辑",
+					),
 				);
 			}
-			const dirty = text !== entry;
+			const feedback =
+				saveState === "saving"
+					? h("span", { style: muted }, "保存中…")
+					: saveState === "saved"
+						? h("span", { style: { ...muted, color: "#2e7d32" } }, "已保存 ✓")
+						: saveState
+							? h("span", { style: { color: "#b3261e", fontSize: "12px", wordBreak: "break-word" } }, saveState)
+							: null;
 			return h(
 				"div",
 				{ style: { ...entryRow, flexDirection: "column", gap: "6px", background: "rgba(127,127,127,0.06)" } },
-				h("textarea", {
-					style: { ...textarea, minHeight: "60px" },
-					value: text,
-					disabled: busy,
-					onChange: (event) => setText(event.target.value),
-				}),
+				h(
+					"textarea",
+					withFocus({
+						style: { ...textarea, minHeight: "60px" },
+						value: text,
+						disabled: busy,
+						"aria-label": "编辑记忆条目",
+						onChange: (event) => setText(event.target.value),
+						onKeyDown: (event) => {
+							if (event.key === "Escape") {
+								event.preventDefault();
+								setText(entry);
+								setSaveState("");
+								setEditing(false);
+								return;
+							}
+							if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+								event.preventDefault();
+								if (text !== entry) void handleSave();
+							}
+						},
+					}),
+				),
 				h(
 					"div",
 					{ style: { ...row, justifyContent: "flex-end" } },
+					feedback ? h("span", { style: { marginRight: "auto", display: "inline-flex" } }, feedback) : null,
 					h(
 						"button",
-						{
+						withFocus({
 							style: ghostBtn,
 							disabled: busy,
 							onClick: () => {
 								setText(entry);
+								setSaveState("");
 								setEditing(false);
 							},
-						},
+						}),
 						"取消",
 					),
 					h(
 						"button",
-						{
+						withFocus({
 							style: { ...smallBtn, opacity: dirty ? 1 : 0.5 },
 							disabled: busy || !dirty,
-							onClick: () => onSave(entry, text),
-						},
+							"aria-label": "保存这条记忆",
+							onClick: () => void handleSave(),
+						}),
 						"保存",
 					),
 					h(
 						"button",
-						{
+						withFocus({
 							style: confirming ? dangerBtn : ghostBtn,
 							disabled: busy,
-							onClick: () => {
-								if (!confirming) {
-									setConfirming(true);
-									return;
-								}
-								setConfirming(false);
-								onRemove(entry);
-							},
-						},
+							"aria-label": "删除这条记忆",
+							onClick: () => void handleRemove(),
+						}),
 						confirming ? "确认删除" : "删除",
 					),
 				),
 			);
 		}
-		function AddEntry({ target, busy, onAdd }) {
+		function AddEntry({ target, onAdd }) {
 			const [text, setText] = react.useState("");
-			const canAdd = text.trim().length > 0 && !busy;
+			const [addBusy, setAddBusy] = react.useState(false);
+			const [addError, setAddError] = react.useState("");
+			const canAdd = text.trim().length > 0 && !addBusy;
+			const submit = async () => {
+				if (!canAdd) return;
+				setAddBusy(true);
+				setAddError("");
+				try {
+					const result = await onAdd(text);
+					if (result && result.ok === false) setAddError(result.error || "添加失败");
+					else setText("");
+				} catch (err) {
+					setAddError(err && err.message ? err.message : String(err));
+				} finally {
+					setAddBusy(false);
+				}
+			};
 			return h(
 				"div",
-				{ style: { ...row, alignItems: "flex-start", gap: "8px", marginTop: "8px" } },
-				h("textarea", {
-					style: { ...textarea, flex: "1 1 auto", minHeight: "36px" },
-					placeholder: "添加一条…",
-					value: text,
-					disabled: busy,
-					onChange: (event) => setText(event.target.value),
-				}),
+				{ style: { ...row, alignItems: "flex-start", gap: "8px", marginTop: "8px", flexWrap: "wrap" } },
+				h(
+					"textarea",
+					withFocus({
+						style: { ...textarea, flex: "1 1 auto", width: "auto", minWidth: 0, minHeight: "36px" },
+						placeholder: "添加一条…",
+						value: text,
+						disabled: addBusy,
+						"aria-label": "新增记忆条目",
+						onChange: (event) => setText(event.target.value),
+						onKeyDown: (event) => {
+							if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+								event.preventDefault();
+								void submit();
+							}
+						},
+					}),
+				),
 				h(
 					"button",
-					{
+					withFocus({
 						style: { ...primaryBtn, minWidth: "56px", opacity: canAdd ? 1 : 0.5 },
 						disabled: !canAdd,
-						onClick: () => {
-							const value = text;
-							onAdd(value).then((ok) => {
-								if (ok) setText("");
-							});
-						},
-					},
-					"添加",
+						"aria-label": "添加记忆条目",
+						onClick: () => void submit(),
+					}),
+					addBusy ? "添加中…" : "添加",
 				),
+				addError ? h("div", { style: { color: "#b3261e", fontSize: "12px", width: "100%" } }, addError) : null,
 			);
 		}
 		function TrackTabs({ tracks, active, onSelect }) {
+			const tabRefs = react.useRef({});
+			const move = (event, index) => {
+				let next = index;
+				if (event.key === "ArrowRight") next = (index + 1) % tracks.length;
+				else if (event.key === "ArrowLeft") next = (index - 1 + tracks.length) % tracks.length;
+				else if (event.key === "Home") next = 0;
+				else if (event.key === "End") next = tracks.length - 1;
+				else return;
+				event.preventDefault();
+				const track = tracks[next];
+				if (!track) return;
+				onSelect(track.key);
+				const node = tabRefs.current[track.key];
+				if (node && typeof node.focus === "function") node.focus();
+			};
 			return h(
 				"div",
-				{ style: tabBar },
-				tracks.map((track) =>
+				{ style: tabBar, role: "tablist", "aria-label": "记忆轨道" },
+				tracks.map((track, index) =>
 					h(
 						"button",
-						{ key: track.key, type: "button", style: track.key === active ? tabActive : tabBase, onClick: () => onSelect(track.key) },
+						withFocus({
+							key: track.key,
+							type: "button",
+							role: "tab",
+							"aria-selected": track.key === active,
+							tabIndex: track.key === active ? 0 : -1,
+							style: track.key === active ? tabActive : tabBase,
+							ref: (node) => {
+								tabRefs.current[track.key] = node;
+							},
+							onClick: () => onSelect(track.key),
+							onKeyDown: (event) => move(event, index),
+						}),
 						track.label,
 						track.count ? h("span", { style: tabCount }, String(track.count)) : null,
 					),
@@ -268,8 +537,15 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		function TrackSection({ target, title: heading, view, busy, onWrite }) {
+		function TrackSection({ target, title: heading, hint, view, busyKey, savedKey, onWrite, onAdd, onEditingChange, onDeleted }) {
 			const entries = Array.isArray(view.entries) ? view.entries : [];
+			const seen = new Map();
+			const keyed = entries.map((entry, index) => {
+				const base = `${target}:${entry}`;
+				const occurrence = seen.get(base) || 0;
+				seen.set(base, occurrence + 1);
+				return { entry, index, key: occurrence === 0 ? base : `${base}:${occurrence}` };
+			});
 			return h(
 				"section",
 				{ style: { marginBottom: "6px" } },
@@ -281,22 +557,26 @@ window.__ModuleLoader__.load({
 				),
 				h("div", { style: { ...row, marginBottom: "10px" } }, h("div", { style: thinTrack }, h("div", { style: barFill(view.percent) }))),
 				entries.length === 0
-					? h("div", { style: { ...muted, padding: "6px 8px" } }, "还没有条目。")
-					: entries.map((entry, index) =>
+					? h("div", { style: { ...muted, padding: "6px 8px", lineHeight: 1.6 } }, hint || "")
+					: keyed.map(({ entry, index, key }) =>
 							h(EntryCard, {
-								key: `${target}:${index}:${entry.slice(0, 24)}`,
+								key,
 								target,
 								entry,
-								index,
-								busy,
-								onSave: (oldText, content) => onWrite({ target, action: "patch", old_text: oldText, content }),
-								onRemove: (oldText) => onWrite({ target, action: "remove", old_text: oldText }),
+								busy: busyKey === key,
+								saved: savedKey === key,
+								onSave: (oldText, content) => onWrite({ target, action: "patch", old_text: oldText, content }, key),
+								onRemove: async (oldText) => {
+									const result = await onWrite({ target, action: "remove", old_text: oldText }, key);
+									if (result && result.ok) onDeleted?.({ target, text: oldText, position: index });
+									return result;
+								},
+								onEditingChange,
 							}),
 						),
 				h(AddEntry, {
 					target,
-					busy,
-					onAdd: (content) => onWrite({ target, action: "add", content }),
+					onAdd: (content) => onAdd({ target, action: "add", content }),
 				}),
 			);
 		}
@@ -342,20 +622,20 @@ window.__ModuleLoader__.load({
 									? null
 									: h(
 											"button",
-											{
+											withFocus({
 												style: primaryBtn,
 												disabled: busy,
 												onClick: () => onDecide({ id: item.id, decision: "apply" }),
-											},
+											}),
 											"批准",
 										),
 								h(
 									"button",
-									{
+									withFocus({
 										style: item.stale ? primaryBtn : smallBtn,
 										disabled: busy,
 										onClick: () => onDecide({ id: item.id, decision: "discard" }),
-									},
+									}),
 									item.stale ? "丢弃这条过期提案" : "丢弃",
 								),
 							),
@@ -367,19 +647,8 @@ window.__ModuleLoader__.load({
 									`${item.stale_reason || "条目自提案后已变"}；这条提案无法再应用，点「丢弃」清理即可。`,
 								)
 							: null,
-						item.old_text
-							? h(
-									"div",
-									{ style: { ...muted, whiteSpace: "pre-wrap", wordBreak: "break-word" } },
-									`old: ${item.old_text.length > 200 ? `${item.old_text.slice(0, 200)}…` : item.old_text}`,
-								)
-							: null,
-						item.content
-							? h(
-									"div",
-									{ style: { ...muted, whiteSpace: "pre-wrap", wordBreak: "break-word" } },
-									`new: ${item.content.length > 200 ? `${item.content.slice(0, 200)}…` : item.content}`,
-								)
+						item.old_text || item.content
+							? h("div", { style: { marginTop: "4px" } }, diffRows(item.old_text, item.content, `${item.id}:diff`))
 							: null,
 						item.operation_count !== undefined
 							? h(
@@ -389,8 +658,9 @@ window.__ModuleLoader__.load({
 									(Array.isArray(item.operations) ? item.operations : []).map((op, opIndex) =>
 										h(
 											"div",
-											{ key: `${item.id}:op:${opIndex}`, style: { paddingLeft: "10px", whiteSpace: "pre-wrap", wordBreak: "break-word" } },
-											`· ${op.action}${op.old_text ? ` "${op.old_text}"` : ""}${op.content ? ` → "${op.content}"` : ""}`,
+											{ key: `${item.id}:op:${opIndex}`, style: { paddingLeft: "10px", marginTop: "3px" } },
+											h("div", { style: { ...muted, opacity: 0.8 } }, `· ${op.action}`),
+											diffRows(op.old_text, op.content, `${item.id}:op:${opIndex}`),
 										),
 									),
 									Array.isArray(item.operations) && item.operation_count > item.operations.length
@@ -436,16 +706,16 @@ window.__ModuleLoader__.load({
 								{ style: row },
 								h(
 									"button",
-									{
+									withFocus({
 										style: primaryBtn,
 										disabled: busy,
 										onClick: () => onDecide({ id: item.id, decision: "accept" }),
-									},
+									}),
 									"采纳",
 								),
 								h(
 									"button",
-									{ style: smallBtn, disabled: busy, onClick: () => onDecide({ id: item.id, decision: "discard" }) },
+									withFocus({ style: smallBtn, disabled: busy, onClick: () => onDecide({ id: item.id, decision: "discard" }) }),
 									"丢弃",
 								),
 							),
@@ -541,7 +811,7 @@ window.__ModuleLoader__.load({
 									item.batch
 										? h("span", { style: muted }, "批量操作不可撤销")
 										: undo
-											? h("button", { style: smallBtn, disabled: busy, onClick: () => onWrite(undo) }, "撤销")
+											? h("button", withFocus({ style: smallBtn, disabled: busy, onClick: () => onWrite(undo) }), "撤销")
 											: null,
 								),
 								h("div", { style: { ...muted, wordBreak: "break-word" } }, writeSummary(item)),
@@ -635,16 +905,16 @@ window.__ModuleLoader__.load({
 						{ style: row },
 						h(
 							"button",
-							{ style: smallBtn, disabled: busy || localBusy, onClick: () => void doExport() },
+							withFocus({ style: smallBtn, disabled: busy || localBusy, onClick: () => void doExport() }),
 							"导出 JSON",
 						),
 						h(
 							"button",
-							{
+							withFocus({
 								style: smallBtn,
 								disabled: busy || localBusy || !text.trim(),
 								onClick: () => void doMerge(),
-							},
+							}),
 							"合并导入",
 						),
 					),
@@ -654,13 +924,14 @@ window.__ModuleLoader__.load({
 					{ style: muted },
 					"安全合并：远端新增才写入；远端删除只报告、不执行；内容重复会在下面「疑似重复」里提示，手动处理。",
 				),
-				h("textarea", {
+				h("textarea", withFocus({
 					style: syncTextArea,
 					value: text,
 					placeholder: "粘贴另一台设备「导出 JSON」得到的内容…",
+					"aria-label": "同步数据 JSON",
 					onChange: (event) => setText(event.target.value),
 					spellCheck: false,
-				}),
+				})),
 				message ? h("div", { style: { ...muted, color: "#2e7d32", marginTop: "6px" } }, message) : null,
 				failure ? h("div", { style: { ...muted, color: "#b3261e", marginTop: "6px" } }, failure) : null,
 			);
@@ -701,8 +972,71 @@ window.__ModuleLoader__.load({
 			const [state, setState] = react.useState(null);
 			const [error, setError] = react.useState("");
 			const [busy, setBusy] = react.useState(false);
+			const [busyKey, setBusyKey] = react.useState("");
 			const [notice, setNotice] = react.useState("");
 			const [activeTrack, setActiveTrack] = react.useState(null);
+			const [editingCount, setEditingCount] = react.useState(0);
+			const editingCountRef = react.useRef(0);
+			const [savedKey, setSavedKey] = react.useState("");
+			const [query, setQuery] = react.useState("");
+			const [searchState, setSearchState] = react.useState({ status: "", results: [], error: "" });
+			const [undoEntry, setUndoEntry] = react.useState(null);
+			const [undoState, setUndoState] = react.useState("");
+			const undoTimerRef = react.useRef(null);
+			const undoDoneTimerRef = react.useRef(null);
+
+			const onEditingChange = react.useCallback((delta) => {
+				const next = Math.max(0, editingCountRef.current + delta);
+				editingCountRef.current = next;
+				setEditingCount(next);
+			}, []);
+
+			react.useEffect(() => {
+				if (!savedKey) return undefined;
+				const timer = setTimeout(() => setSavedKey(""), 2000);
+				return () => clearTimeout(timer);
+			}, [savedKey]);
+
+			react.useEffect(
+				() => () => {
+					if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+					if (undoDoneTimerRef.current) clearTimeout(undoDoneTimerRef.current);
+				},
+				[],
+			);
+
+			const clearSearch = react.useCallback(() => {
+				setQuery("");
+				setSearchState({ status: "", results: [], error: "" });
+			}, []);
+
+			const runSearch = react.useCallback(async () => {
+				const text = query.trim();
+				if (!text) return;
+				setSearchState({ status: "loading", results: [], error: "" });
+				try {
+					const data = await fetchJson(`${API.search}?q=${encodeURIComponent(text)}&limit=20`);
+					const results = Array.isArray(data && data.results) ? data.results : [];
+					setSearchState({ status: "done", results, error: "" });
+				} catch (err) {
+					setSearchState({
+						status: "error",
+						results: [],
+						error: err && err.message ? err.message : String(err),
+					});
+				}
+			}, [query]);
+
+			const handleDeleted = react.useCallback(({ target, text, position }) => {
+				if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+				if (undoDoneTimerRef.current) clearTimeout(undoDoneTimerRef.current);
+				setUndoEntry({ target, text, position });
+				setUndoState("");
+				undoTimerRef.current = setTimeout(() => {
+					setUndoEntry(null);
+					setUndoState("");
+				}, 5000);
+			}, []);
 
 			const refresh = react.useCallback(async (silent = false) => {
 				try {
@@ -723,12 +1057,15 @@ window.__ModuleLoader__.load({
 			react.useEffect(() => {
 				if (typeof window === "undefined" || typeof document === "undefined") return undefined;
 				const timer = setInterval(() => {
+					if (editingCountRef.current > 0) return;
 					void refresh(true);
 				}, 10000);
 				const onFocus = () => {
+					if (editingCountRef.current > 0) return;
 					void refresh(true);
 				};
 				const onVisibilityChange = () => {
+					if (editingCountRef.current > 0) return;
 					if (document.visibilityState === "visible") void refresh(true);
 				};
 				window.addEventListener("focus", onFocus);
@@ -741,33 +1078,80 @@ window.__ModuleLoader__.load({
 			}, [refresh]);
 
 			const applyResult = react.useCallback(
-				async (promise) => {
-					setBusy(true);
-					setNotice("");
+				async (promise, key = "") => {
+					if (key) setBusyKey(key);
+					else setBusy(true);
+					if (!key) setNotice("");
 					try {
 						const data = await promise;
 						if (data && data.ok === false) {
-							setError(data.error || "写入失败");
-							return false;
+							const message = data.error || "写入失败";
+							if (!key) setError(message);
+							return { ok: false, error: message };
 						}
 						if (data && data.state) setState(data.state);
 						else await refresh();
-						setError("");
-						setNotice("已保存");
-						return true;
+						if (!key) {
+							setError("");
+							setNotice("已保存");
+						}
+						return { ok: true };
 					} catch (err) {
-						setError(err && err.message ? err.message : String(err));
-						return false;
+						const message = err && err.message ? err.message : String(err);
+						if (!key) setError(message);
+						return { ok: false, error: message };
 					} finally {
-						setBusy(false);
+						if (key) setBusyKey("");
+						else setBusy(false);
 					}
 				},
 				[refresh],
 			);
 
 			const onWrite = react.useCallback(
-				(body) => applyResult(fetchJson(API.write, body)),
+				async (body, key = "") => {
+					const result = await applyResult(fetchJson(API.write, body), key);
+					if (key && result && result.ok && body && body.action === "patch") {
+						setSavedKey(`${body.target}:${body.content}`);
+					}
+					return result;
+				},
 				[applyResult],
+			);
+
+			const handleUndo = react.useCallback(async () => {
+				if (!undoEntry) return;
+				setUndoState("undoing");
+				const result = await onWrite({
+					target: undoEntry.target,
+					action: "restore",
+					content: undoEntry.text,
+					position: undoEntry.position,
+				});
+				if (!result || result.ok === false) {
+					setUndoState((result && result.error) || "撤销失败");
+					return;
+				}
+				if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+				if (undoDoneTimerRef.current) clearTimeout(undoDoneTimerRef.current);
+				setUndoEntry(null);
+				setUndoState("done");
+				undoDoneTimerRef.current = setTimeout(() => setUndoState(""), 2000);
+			}, [undoEntry, onWrite]);
+
+			const onAddEntry = react.useCallback(
+				async (body) => {
+					try {
+						const data = await fetchJson(API.write, body);
+						if (data && data.ok === false) return { ok: false, error: data.error || "写入失败" };
+						if (data && data.state) setState(data.state);
+						else await refresh();
+						return { ok: true };
+					} catch (err) {
+						return { ok: false, error: err && err.message ? err.message : String(err) };
+					}
+				},
+				[refresh],
 			);
 
 			const onDecide = react.useCallback(
@@ -800,6 +1184,7 @@ window.__ModuleLoader__.load({
 			const reviewCount = Array.isArray(state.reviews) ? state.reviews.length : 0;
 			const writeCount = Array.isArray(state.writes) ? state.writes.length : 0;
 			const conflictCount = Array.isArray(state.conflicts) ? state.conflicts.length : 0;
+			const searchResults = searchState && Array.isArray(searchState.results) ? searchState.results : [];
 
 			return h(
 				"div",
@@ -809,8 +1194,35 @@ window.__ModuleLoader__.load({
 					{ style: { ...row, justifyContent: "space-between", marginBottom: "2px" } },
 					h(
 						"div",
-						{ style: row },
+						{ style: { ...row, flexWrap: "wrap" } },
 						h("span", { style: title }, "记忆"),
+						h(
+							"input",
+							withFocus({
+								type: "text",
+								style: searchInput,
+								placeholder: "搜索五轨记忆…",
+								"aria-label": "搜索记忆",
+								value: query,
+								onChange: (event) => setQuery(event.target.value),
+								onKeyDown: (event) => {
+									if (event.key === "Enter") {
+										event.preventDefault();
+										void runSearch();
+									}
+								},
+							}),
+						),
+						h(
+							"button",
+							withFocus({
+								style: primaryBtn,
+								disabled: !query.trim() || searchState?.status === "loading",
+								"aria-label": "搜索记忆",
+								onClick: () => void runSearch(),
+							}),
+							searchState?.status === "loading" ? "搜索中…" : "搜索",
+						),
 						pendingCount ? h("span", { style: { ...muted, color: "#b3261e" } }, `${pendingCount} 条待确认`) : null,
 					),
 					h(
@@ -819,13 +1231,14 @@ window.__ModuleLoader__.load({
 						notice && !error ? h("span", { style: muted }, notice) : null,
 						h(
 							"button",
-							{
+							withFocus({
 								style: ghostBtn,
 								disabled: busy,
+								"aria-label": "刷新记忆面板",
 								onClick: () => {
 									void refresh();
 								},
-							},
+							}),
 							busy ? "刷新中…" : "刷新",
 						),
 					),
@@ -833,7 +1246,63 @@ window.__ModuleLoader__.load({
 				h("div", { style: note }, "写入立即生效；本会话下一轮可见。"),
 				error ? h("div", { style: { ...muted, color: "#b3261e", marginBottom: "10px" } }, error) : null,
 				h(TrackTabs, { tracks, active: activeKey, onSelect: setActiveTrack }),
-				activeView ? h(TrackSection, { target: activeKey, title: activeMeta.title, view: activeView, busy, onWrite }) : null,
+				searchState?.status
+					? h(
+							"section",
+							{
+								style: {
+									...flatSection,
+									borderBottom: "1px solid rgba(127,127,127,0.25)",
+									paddingBottom: "10px",
+									marginBottom: "14px",
+								},
+							},
+							h(
+								"div",
+								{ style: { ...muted, marginBottom: "6px" } },
+								searchState.status === "loading" ? "搜索中…" : `搜索结果 · ${searchResults.length} 条`,
+							),
+							searchState.status === "loading"
+								? null
+								: searchState.status === "error"
+									? h(
+											"div",
+											{ style: { color: "#b3261e", fontSize: "12px", wordBreak: "break-word" } },
+											searchState.error || "搜索失败",
+										)
+									: searchResults.length === 0
+										? h("div", { style: muted }, "没有匹配的条目。")
+										: searchResults.map((item, index) =>
+												h(
+													"button",
+													withFocus({
+														key: `${item.target}:${index}`,
+														type: "button",
+														style: searchResultRow,
+														onClick: () => {
+															setActiveTrack(item.target);
+															clearSearch();
+														},
+													}),
+													`${trackLabel(item.target)} · ${clipRaw(item.entry, 160)}`,
+												),
+											),
+						)
+					: null,
+				activeView
+					? h(TrackSection, {
+							target: activeKey,
+							title: activeMeta.title,
+							hint: activeMeta.hint,
+							view: activeView,
+							busyKey,
+							savedKey,
+							onWrite,
+							onAdd: onAddEntry,
+							onEditingChange,
+							onDeleted: handleDeleted,
+						})
+					: null,
 				h(PendingSection, { items: state.pending, busy, onDecide, error: "", notice: "" }),
 				h(
 					"details",
@@ -849,6 +1318,27 @@ window.__ModuleLoader__.load({
 					conflictCount ? h(ConflictsSection, { items: state.conflicts }) : null,
 					h(SyncSection, { busy, onMerged: refresh }),
 				),
+				undoEntry || undoState === "done"
+					? h(
+							"div",
+							{ style: toastBox, role: "status", "aria-live": "polite" },
+							h("span", null, undoState === "done" ? "已撤销" : "已删除 · "),
+							undoEntry
+								? h(
+										"button",
+										withFocus({
+											style: toastBtn,
+											disabled: undoState === "undoing",
+											onClick: () => void handleUndo(),
+										}),
+										undoState === "undoing" ? "撤销中…" : "撤销",
+									)
+								: null,
+							undoEntry && undoState && undoState !== "undoing" && undoState !== "done"
+								? h("span", { style: { color: "#ffb4ab", wordBreak: "break-word" } }, undoState)
+								: null,
+						)
+					: null,
 			);
 		}
 
@@ -1024,12 +1514,20 @@ window.__ModuleLoader__.load({
 					null,
 					h(
 						"div",
-						{
+						withFocus({
 							style: toolRowStyle,
 							role: "button",
+							tabIndex: 0,
 							title: open ? "收起" : "查看详情",
+							"aria-expanded": open,
 							onClick: () => setOpen(!open),
-						},
+							onKeyDown: (event) => {
+								if (event.key === "Enter" || event.key === " ") {
+									event.preventDefault();
+									setOpen(!open);
+								}
+							},
+						}),
 						h("span", { style: { fontSize: "13px", lineHeight: "18px" } }, view.icon),
 						h(
 							"span",
@@ -1131,10 +1629,10 @@ window.__ModuleLoader__.load({
 			}
 			children.push(
 				h("span", { key: "spacer", style: { flex: "1 1 auto" } }),
-				h("button", { key: "open", style: smallBtn, onClick: openPanel }, "打开面板"),
+				h("button", withFocus({ key: "open", style: smallBtn, onClick: openPanel }), "打开面板"),
 			);
 			if (commandMode && canClear) {
-				children.push(h("button", { key: "clear", style: smallBtn, onClick: clearInput }, "清空输入"));
+				children.push(h("button", withFocus({ key: "clear", style: smallBtn, onClick: clearInput }), "清空输入"));
 			}
 			return h(
 				"div",

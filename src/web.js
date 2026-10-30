@@ -13,6 +13,7 @@ import { MemoryError } from './store.js';
 import { applyRecord, pendingStaleness, summarizePending } from './pending.js';
 import { exportBundle, mergeBundle } from './sync.js';
 import { findConflictGroups } from './conflicts.js';
+import { searchMemory } from './search.js';
 
 const ROUTES = {
   state: '/api/dsh-memory-notes/state',
@@ -20,6 +21,7 @@ const ROUTES = {
   pending: '/api/dsh-memory-notes/pending',
   suggestions: '/api/dsh-memory-notes/suggestions',
   sync: '/api/dsh-memory-notes/sync',
+  search: '/api/dsh-memory-notes/search',
 };
 
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -174,6 +176,13 @@ export function createWebApi({ store, pending, reviewLog, writeLog, suggestions,
       }
     },
 
+    search({ q, target, limit } = {}) {
+      if (typeof q !== 'string' || !q.trim()) return { ok: true, results: [] };
+      const targets = store?.targets ?? [];
+      const filterTarget = typeof target === 'string' && targets.includes(target) ? target : undefined;
+      return { ok: true, results: searchMemory(store, q, { target: filterTarget, limit }) };
+    },
+
     syncMerge(body) {
       const bundle = body && typeof body === 'object' && body.bundle ? body.bundle : body;
       try {
@@ -212,8 +221,15 @@ export function createWebApi({ store, pending, reviewLog, writeLog, suggestions,
             return { ok: false, error: "old_text is required for 'remove'" };
           }
           result = store.remove(target, oldText);
+        } else if (action === 'restore') {
+          // 撤销面板删除：刚腾出的空间不算超预算，跳过预算/近似门（硬上限仍然生效）。
+          if (typeof content !== 'string' || !content.trim()) {
+            return { ok: false, error: "content is required for 'restore'" };
+          }
+          const position = Number.isInteger(input.position) ? input.position : undefined;
+          result = store.add(target, content, { skipGates: true, position });
         } else {
-          return { ok: false, error: `Unknown action '${String(action)}'. Use: add, patch, remove` };
+          return { ok: false, error: `Unknown action '${String(action)}'. Use: add, patch, remove, restore` };
         }
         return { ok: true, result, state: this.state() };
       } catch (err) {
@@ -381,6 +397,37 @@ function syncRouteHandler(api, authorize) {
   };
 }
 
+/** 只读检索路由：GET-only，查询串取 q / target / limit。 */
+function searchRouteHandler(api, authorize) {
+  return async (req, res) => {
+    try {
+      if (typeof authorize === 'function' && authorize(req, res) === true) return;
+      if (!isLoopbackRequest(req)) {
+        writeJson(res, 403, { ok: false, error: 'forbidden: loopback requests only' });
+        return;
+      }
+      const method = String(req.method ?? '').toUpperCase();
+      if (method !== 'GET') {
+        writeJson(res, 405, { ok: false, error: 'method GET only' });
+        return;
+      }
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      const params = url.searchParams;
+      writeJson(
+        res,
+        200,
+        api.search({
+          q: params.get('q') ?? '',
+          target: params.get('target') ?? undefined,
+          limit: params.get('limit') ?? undefined,
+        }),
+      );
+    } catch (err) {
+      writeJson(res, 400, { ok: false, error: err?.message ?? String(err) });
+    }
+  };
+}
+
 /** 组装路由（形状同 webServer.register 契约：{kind:'exact', path, handler}）。 */
 export function buildRoutes(api, options = {}) {
   const { authorize } = options;
@@ -398,6 +445,7 @@ export function buildRoutes(api, options = {}) {
       handler: handler(api, (a, body) => a.suggestionsDecision(body), 'POST', authorize),
     },
     { kind: 'exact', path: ROUTES.sync, handler: syncRouteHandler(api, authorize) },
+    { kind: 'exact', path: ROUTES.search, handler: searchRouteHandler(api, authorize) },
   ];
 }
 
