@@ -100,16 +100,17 @@ window.__ModuleLoader__.load({
 		});
 
 		const panel = {
-			padding: "16px 20px 36px",
-			maxWidth: "780px",
-			margin: "0 auto",
+			padding: "20px 28px 56px",
+			maxWidth: "1280px",
+			margin: "0",
+			width: "100%",
 			boxSizing: "border-box",
 			height: "100%",
 			overflow: "auto",
 		};
 		const title = { fontSize: "15px", fontWeight: 600, letterSpacing: "0.01em" };
 		const note = { fontSize: "12px", opacity: 0.55, margin: "6px 0 14px" };
-		const tabBar = { display: "flex", gap: "2px", marginBottom: "14px", borderBottom: "1px solid rgba(127,127,127,0.22)" };
+		const tabBar = { display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: "2px", marginBottom: "14px", borderBottom: "1px solid rgba(127,127,127,0.22)" };
 		const tabBase = {
 			font: "inherit",
 			fontSize: "12px",
@@ -125,7 +126,7 @@ window.__ModuleLoader__.load({
 		const tabActive = { ...tabBase, opacity: 1, borderBottom: "2px solid currentColor" };
 		const tabCount = { marginLeft: "5px", fontSize: "11px", opacity: 0.6 };
 		const thinTrack = { height: "3px", borderRadius: "999px", background: "rgba(127,127,127,0.2)", overflow: "hidden", flex: "1 1 auto" };
-		const entryRow = { display: "flex", alignItems: "flex-start", gap: "8px", padding: "6px 8px", borderRadius: "7px", borderBottom: "1px solid rgba(127,127,127,0.14)" };
+		const entryRow = { display: "flex", alignItems: "flex-start", gap: "8px", padding: "6px 8px", borderRadius: "7px", borderBottom: "1px solid rgba(127,127,127,0.14)", width: "100%", boxSizing: "border-box" };
 		const entryText = { flex: "1 1 auto", minWidth: 0, fontSize: "13px", lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "42px", overflow: "hidden", cursor: "pointer" };
 		const ghostBtn = { font: "inherit", fontSize: "11px", padding: "2px 6px", border: "none", borderRadius: "6px", background: "transparent", color: "inherit", opacity: 0.55, cursor: "pointer" };
 		const detailsBox = { marginTop: "18px", borderTop: "1px solid rgba(127,127,127,0.22)", paddingTop: "10px" };
@@ -167,7 +168,7 @@ window.__ModuleLoader__.load({
 					"div",
 					{ style: entryRow },
 					h("span", { style: entryText, title: entry, onClick: () => setEditing(true) }, entry),
-					h("button", { style: ghostBtn, disabled: busy, onClick: () => setEditing(true) }, "编辑"),
+					h("button", { style: { ...ghostBtn, flex: "0 0 auto" }, disabled: busy, onClick: () => setEditing(true) }, "编辑"),
 				);
 			}
 			const dirty = text !== entry;
@@ -239,7 +240,7 @@ window.__ModuleLoader__.load({
 				h(
 					"button",
 					{
-						style: { ...primaryBtn, opacity: canAdd ? 1 : 0.5 },
+						style: { ...primaryBtn, minWidth: "56px", opacity: canAdd ? 1 : 0.5 },
 						disabled: !canAdd,
 						onClick: () => {
 							const value = text;
