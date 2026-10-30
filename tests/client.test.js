@@ -102,9 +102,11 @@ test("client bundle registers panel and per-tool rows, and cleans them up", asyn
 	assert.ok(dock, "conversation.composer.dock must be registered");
 	assert.equal(dock.definition.id, "memory-notes-dock");
 
-	const badge = registrations.find((entry) => entry.definition.name === "sidebar.toggle.badge");
-	assert.ok(badge, "sidebar.toggle.badge must be registered");
-	assert.equal(textOf(badge.component({})), "");
+	assert.equal(
+		registrations.find((entry) => entry.definition.name === "sidebar.toggle.badge"),
+		undefined,
+		"sidebar.toggle.badge is a single host-owned slot and must not be registered",
+	);
 
 	assert.equal(cleanups.length, 1);
 	assert.doesNotThrow(() => cleanups[0]());

@@ -641,6 +641,10 @@ window.__ModuleLoader__.load({
 					setNotice("");
 					try {
 						const data = await promise;
+						if (data && data.ok === false) {
+							setError(data.error || "写入失败");
+							return false;
+						}
 						if (data && data.state) setState(data.state);
 						else await refresh();
 						setError("");
@@ -1065,16 +1069,6 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		/* 侧栏折叠时展开按钮里的红点。 */
-		function MemoryBadge() {
-			const status = useMemoryStatus();
-			if (!status.pending) return null;
-			return h("span", {
-				title: `${status.pending} 条记忆待确认`,
-				style: { display: "inline-block", width: 6, height: 6, borderRadius: 3, background: "#b3261e" },
-			});
-		}
-
 		/* layout 服务可能比我们晚就绪：点击时再解析一次，别把 null 缓存成永久结论。 */
 		function resolveLayoutFace() {
 			if (layoutFace) return layoutFace;
@@ -1092,30 +1086,29 @@ window.__ModuleLoader__.load({
 			const disposers = [];
 			try {
 				disposers.push(
-					slots.inject("conversation.composer.dock", () =>
-						slots.register(
-							{
-								name: "conversation.composer.dock",
-								id: "memory-notes-dock",
-								order: 40,
-								label: () => "记忆",
-							},
-							MemoryDock,
-						),
-					),
+					slots.inject("conversation.composer.dock", () => {
+						try {
+							return slots.register(
+								{
+									name: "conversation.composer.dock",
+									id: "memory-notes-dock",
+									order: 40,
+									label: () => "记忆",
+								},
+								MemoryDock,
+							);
+						} catch (err) {
+							console.warn("[dsh-memory-notes] composer dock registration failed:", err);
+							return () => {};
+						}
+					}),
 				);
 			} catch {
 				/* 宿主没有该 slot 时跳过 */
 			}
-			try {
-				disposers.push(
-					slots.inject("sidebar.toggle.badge", () =>
-						slots.register({ name: "sidebar.toggle.badge" }, MemoryBadge),
-					),
-				);
-			} catch {
-				/* 宿主没有该 slot 时跳过 */
-			}
+			/* 注意：sidebar.toggle.badge 是 single slot 且被宿主占用（replaceRisk shadows-shipped-ui），
+			   注册会抛 "single slot already has a registration"，曾经把 apply 整块打断、dock 都不出现。
+			   待确认数量已经显示在 dock 上，这里不再注册徽标。 */
 			return () => {
 				for (const dispose of disposers.splice(0)) {
 					try {

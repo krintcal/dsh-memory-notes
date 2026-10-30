@@ -212,6 +212,8 @@ per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默
 
 DSH 未提供插件级命令注册面，这是目前能做到的最接近形态。
 
+修过的坑（0.12.2）：`sidebar.toggle.badge` 是 single slot 且被宿主占用（`replaceRisk: shadows-shipped-ui`），注册它会在浏览器里抛 `single slot "sidebar.toggle.badge" already has a registration`，把整个 apply 打断——dock 可能整个不出现。已不再注册徽标（待确认数量显示在 dock 上），并把 dock 的 register 回调包了 try/catch。
+
 修过的坑（0.12.1）：`layout` 服务是面板跳转的前提。原来的 apply 里 `ctx.get('layout')` 取一次就把结果缓存了，若 layout 尚未就绪就会永久是 null——「打开面板」点了没反应。现在 client bundle 的 `inject` 声明了 `layout`（`dsh.client.inject` 也加回 `@deepseek-ai/dsh-client-ui-layout`），并且点击时还会懒解析一次；缺 layout 时按钮只 console.warn，不抛错。
 
 ## 0.11.0：工具面减法、日志轨与快照稳定
