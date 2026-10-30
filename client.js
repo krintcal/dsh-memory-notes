@@ -99,6 +99,48 @@ window.__ModuleLoader__.load({
 			transition: "width 160ms ease",
 		});
 
+		const panel = {
+			padding: "16px 20px 36px",
+			maxWidth: "780px",
+			margin: "0 auto",
+			boxSizing: "border-box",
+			height: "100%",
+			overflow: "auto",
+		};
+		const title = { fontSize: "15px", fontWeight: 600, letterSpacing: "0.01em" };
+		const note = { fontSize: "12px", opacity: 0.55, margin: "6px 0 14px" };
+		const tabBar = { display: "flex", gap: "2px", marginBottom: "14px", borderBottom: "1px solid rgba(127,127,127,0.22)" };
+		const tabBase = {
+			font: "inherit",
+			fontSize: "12px",
+			padding: "6px 10px",
+			marginBottom: "-1px",
+			border: "none",
+			borderBottom: "2px solid transparent",
+			background: "transparent",
+			color: "inherit",
+			cursor: "pointer",
+			opacity: 0.55,
+		};
+		const tabActive = { ...tabBase, opacity: 1, borderBottom: "2px solid currentColor" };
+		const tabCount = { marginLeft: "5px", fontSize: "11px", opacity: 0.6 };
+		const thinTrack = { height: "3px", borderRadius: "999px", background: "rgba(127,127,127,0.2)", overflow: "hidden", flex: "1 1 auto" };
+		const entryRow = { display: "flex", alignItems: "flex-start", gap: "8px", padding: "6px 8px", borderRadius: "7px", borderBottom: "1px solid rgba(127,127,127,0.14)" };
+		const entryText = { flex: "1 1 auto", minWidth: 0, fontSize: "13px", lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "42px", overflow: "hidden", cursor: "pointer" };
+		const ghostBtn = { font: "inherit", fontSize: "11px", padding: "2px 6px", border: "none", borderRadius: "6px", background: "transparent", color: "inherit", opacity: 0.55, cursor: "pointer" };
+		const detailsBox = { marginTop: "18px", borderTop: "1px solid rgba(127,127,127,0.22)", paddingTop: "10px" };
+		const detailsSummary = { fontSize: "12px", opacity: 0.6, cursor: "pointer", userSelect: "none", marginBottom: "10px" };
+
+		const TRACK_META = [
+			{ key: "memory", label: "记忆", title: "MEMORY · 我的工作笔记" },
+			{ key: "user", label: "用户", title: "USER PROFILE · 用户是谁" },
+			{ key: "key", label: "关键", title: "KEY · 当前项目/分支要点" },
+			{ key: "project", label: "项目日志", title: "PROJECT · 项目日志" },
+			{ key: "daily", label: "每日", title: "DAILY · 每日日志" },
+		];
+		const flatSection = { marginBottom: "16px" };
+		const itemBox = { padding: "8px 10px", borderRadius: "8px", marginBottom: "8px", background: "rgba(127,127,127,0.06)" };
+
 		function formatClock(value) {
 			const date = value instanceof Date ? value : new Date(value);
 			if (Number.isNaN(date.getTime())) return "";
@@ -108,68 +150,88 @@ window.__ModuleLoader__.load({
 		/* ------------------------------- entry card ------------------------------ */
 
 		function EntryCard({ target, entry, index, busy, onSave, onRemove }) {
+			const [editing, setEditing] = react.useState(false);
 			const [text, setText] = react.useState(entry);
-			react.useEffect(() => setText(entry), [entry]);
 			const [confirming, setConfirming] = react.useState(false);
+			react.useEffect(() => {
+				setText(entry);
+				setEditing(false);
+			}, [entry]);
 			react.useEffect(() => {
 				if (!confirming) return undefined;
 				const timer = setTimeout(() => setConfirming(false), 3000);
 				return () => clearTimeout(timer);
 			}, [confirming]);
+			if (!editing) {
+				return h(
+					"div",
+					{ style: entryRow },
+					h("span", { style: entryText, title: entry, onClick: () => setEditing(true) }, entry),
+					h("button", { style: ghostBtn, disabled: busy, onClick: () => setEditing(true) }, "编辑"),
+				);
+			}
 			const dirty = text !== entry;
 			return h(
 				"div",
-				{ style: { ...card, padding: "10px 12px", marginBottom: "10px" } },
-				h(
-					"div",
-					{ style: { ...row, justifyContent: "space-between", marginBottom: "6px" } },
-					h("span", { style: muted }, `${target} · #${index + 1} · ${entry.length} 字符`),
-					h(
-						"div",
-						{ style: row },
-						dirty
-							? h(
-									"button",
-									{ style: primaryBtn, disabled: busy, onClick: () => onSave(entry, text) },
-									"保存",
-								)
-							: null,
-						h(
-							"button",
-							{
-								style: confirming ? dangerBtn : smallBtn,
-								disabled: busy,
-								onClick: () => {
-									if (!confirming) {
-										setConfirming(true);
-										return;
-									}
-									setConfirming(false);
-									onRemove(entry);
-								},
-							},
-							confirming ? "确认删除" : "删除",
-						),
-					),
-				),
+				{ style: { ...entryRow, flexDirection: "column", gap: "6px", background: "rgba(127,127,127,0.06)" } },
 				h("textarea", {
-					style: textarea,
+					style: { ...textarea, minHeight: "60px" },
 					value: text,
 					disabled: busy,
 					onChange: (event) => setText(event.target.value),
 				}),
+				h(
+					"div",
+					{ style: { ...row, justifyContent: "flex-end" } },
+					h(
+						"button",
+						{
+							style: ghostBtn,
+							disabled: busy,
+							onClick: () => {
+								setText(entry);
+								setEditing(false);
+							},
+						},
+						"取消",
+					),
+					h(
+						"button",
+						{
+							style: { ...smallBtn, opacity: dirty ? 1 : 0.5 },
+							disabled: busy || !dirty,
+							onClick: () => onSave(entry, text),
+						},
+						"保存",
+					),
+					h(
+						"button",
+						{
+							style: confirming ? dangerBtn : ghostBtn,
+							disabled: busy,
+							onClick: () => {
+								if (!confirming) {
+									setConfirming(true);
+									return;
+								}
+								setConfirming(false);
+								onRemove(entry);
+							},
+						},
+						confirming ? "确认删除" : "删除",
+					),
+				),
 			);
 		}
-
 		function AddEntry({ target, busy, onAdd }) {
 			const [text, setText] = react.useState("");
 			const canAdd = text.trim().length > 0 && !busy;
 			return h(
 				"div",
-				{ style: { ...row, alignItems: "flex-end", gap: "8px" } },
+				{ style: { ...row, alignItems: "flex-start", gap: "8px", marginTop: "8px" } },
 				h("textarea", {
-					style: { ...textarea, flex: "1 1 auto", minHeight: "44px" },
-					placeholder: `给 ${target} 添加一条记忆…`,
+					style: { ...textarea, flex: "1 1 auto", minHeight: "36px" },
+					placeholder: "添加一条…",
 					value: text,
 					disabled: busy,
 					onChange: (event) => setText(event.target.value),
@@ -190,22 +252,36 @@ window.__ModuleLoader__.load({
 				),
 			);
 		}
+		function TrackTabs({ tracks, active, onSelect }) {
+			return h(
+				"div",
+				{ style: tabBar },
+				tracks.map((track) =>
+					h(
+						"button",
+						{ key: track.key, type: "button", style: track.key === active ? tabActive : tabBase, onClick: () => onSelect(track.key) },
+						track.label,
+						track.count ? h("span", { style: tabCount }, String(track.count)) : null,
+					),
+				),
+			);
+		}
 
-		function StoreSection({ target, title, subtitle, view, busy, onWrite }) {
+		function TrackSection({ target, title: heading, view, busy, onWrite }) {
+			const entries = Array.isArray(view.entries) ? view.entries : [];
 			return h(
 				"section",
-				{ style: card },
+				{ style: { marginBottom: "6px" } },
 				h(
 					"div",
 					{ style: { ...row, justifyContent: "space-between", marginBottom: "4px" } },
-					h("strong", { style: { fontSize: "14px" } }, title),
-					h("span", { style: muted }, `${view.entries.length} 条 · ${view.usage}`),
+					h("span", { style: { fontSize: "12px", fontWeight: 600, opacity: 0.8 } }, heading),
+					h("span", { style: muted, title: view.usage }, `${entries.length} 条 · ${view.percent}%`),
 				),
-				h("div", { style: { ...muted, marginBottom: "8px" } }, subtitle),
-				h("div", { style: { ...row, marginBottom: "12px" } }, h("div", { style: barTrack }, h("div", { style: barFill(view.percent) }))),
-				view.entries.length === 0
-					? h("div", { style: { ...muted, marginBottom: "10px" } }, "（空）")
-					: view.entries.map((entry, index) =>
+				h("div", { style: { ...row, marginBottom: "10px" } }, h("div", { style: thinTrack }, h("div", { style: barFill(view.percent) }))),
+				entries.length === 0
+					? h("div", { style: { ...muted, padding: "6px 8px" } }, "还没有条目。")
+					: entries.map((entry, index) =>
 							h(EntryCard, {
 								key: `${target}:${index}:${entry.slice(0, 24)}`,
 								target,
@@ -223,12 +299,11 @@ window.__ModuleLoader__.load({
 				}),
 			);
 		}
-
 		function PendingSection({ items, busy, onDecide, error, notice }) {
 			if (!Array.isArray(items) || items.length === 0) return null;
 			return h(
 				"section",
-				{ style: card },
+				{ style: flatSection },
 				h(
 					"div",
 					{ style: { ...row, justifyContent: "space-between", marginBottom: "8px" } },
@@ -243,7 +318,7 @@ window.__ModuleLoader__.load({
 				items.map((item) =>
 					h(
 						"div",
-						{ key: item.id, style: { ...card, padding: "10px 12px", marginBottom: "10px" } },
+						{ key: item.id, style: itemBox },
 						h(
 							"div",
 							{ style: { ...row, justifyContent: "space-between", marginBottom: "4px" } },
@@ -330,7 +405,7 @@ window.__ModuleLoader__.load({
 			if (!Array.isArray(items) || items.length === 0) return null;
 			return h(
 				"section",
-				{ style: card },
+				{ style: flatSection },
 				h(
 					"div",
 					{ style: { ...row, justifyContent: "space-between", marginBottom: "8px" } },
@@ -345,7 +420,7 @@ window.__ModuleLoader__.load({
 				items.map((item) =>
 					h(
 						"div",
-						{ key: item.id, style: { ...card, padding: "10px 12px", marginBottom: "10px" } },
+						{ key: item.id, style: itemBox },
 						h(
 							"div",
 							{ style: { ...row, justifyContent: "space-between", marginBottom: "4px" } },
@@ -408,7 +483,7 @@ window.__ModuleLoader__.load({
 			const list = Array.isArray(items) ? items : [];
 			return h(
 				"section",
-				{ style: card },
+				{ style: flatSection },
 				h(
 					"div",
 					{ style: { ...row, justifyContent: "space-between", marginBottom: "8px" } },
@@ -435,7 +510,7 @@ window.__ModuleLoader__.load({
 			const list = Array.isArray(items) ? items : [];
 			return h(
 				"section",
-				{ style: card },
+				{ style: flatSection },
 				h(
 					"div",
 					{ style: { ...row, justifyContent: "space-between", marginBottom: "8px" } },
@@ -448,7 +523,7 @@ window.__ModuleLoader__.load({
 							const undo = undoBody(item);
 							return h(
 								"div",
-								{ key: `${item.ts}:${index}`, style: { ...card, padding: "8px 10px", marginBottom: "8px" } },
+								{ key: `${item.ts}:${index}`, style: itemBox },
 								h(
 									"div",
 									{ style: { ...row, justifyContent: "space-between", marginBottom: "3px" } },
@@ -544,7 +619,7 @@ window.__ModuleLoader__.load({
 
 			return h(
 				"div",
-				{ style: card },
+				{ style: flatSection },
 				h(
 					"div",
 					{ style: { ...row, justifyContent: "space-between", marginBottom: "6px" } },
@@ -590,7 +665,7 @@ window.__ModuleLoader__.load({
 			if (!Array.isArray(items) || items.length === 0) return null;
 			return h(
 				"div",
-				{ style: card },
+				{ style: flatSection },
 				h("strong", null, "疑似重复 · 需要人工合并"),
 				h(
 					"div",
@@ -621,6 +696,7 @@ window.__ModuleLoader__.load({
 			const [error, setError] = react.useState("");
 			const [busy, setBusy] = react.useState(false);
 			const [notice, setNotice] = react.useState("");
+			const [activeTrack, setActiveTrack] = react.useState(null);
 
 			const refresh = react.useCallback(async (silent = false) => {
 				try {
@@ -706,22 +782,31 @@ window.__ModuleLoader__.load({
 				);
 			}
 
-			const memory = state.targets && state.targets.memory;
-			const user = state.targets && state.targets.user;
-			const key = state.targets && state.targets.key;
-			const project = state.targets && state.targets.project;
-			const daily = state.targets && state.targets.daily;
+			const tracks = TRACK_META.filter((meta) => state.targets && state.targets[meta.key]).map((meta) => {
+				const view = state.targets[meta.key];
+				return { key: meta.key, label: meta.label, count: view.entries.length, percent: view.percent };
+			});
+			const activeKey = tracks.some((track) => track.key === activeTrack) ? activeTrack : tracks[0] && tracks[0].key;
+			const activeMeta = TRACK_META.find((meta) => meta.key === activeKey) || TRACK_META[0];
+			const activeView = activeKey && state.targets ? state.targets[activeKey] : null;
+			const pendingCount = Array.isArray(state.pending) ? state.pending.length : 0;
+			const suggestionCount = Array.isArray(state.suggestions) ? state.suggestions.length : 0;
+			const reviewCount = Array.isArray(state.reviews) ? state.reviews.length : 0;
+			const writeCount = Array.isArray(state.writes) ? state.writes.length : 0;
+			const conflictCount = Array.isArray(state.conflicts) ? state.conflicts.length : 0;
 
 			return h(
 				"div",
-				{
-					"data-dsh-memory-notes-view": "",
-					style: { padding: "18px 22px 40px", overflow: "auto", height: "100%", boxSizing: "border-box" },
-				},
+				{ "data-dsh-memory-notes-view": "", style: panel },
 				h(
 					"div",
-					{ style: { ...row, justifyContent: "space-between", marginBottom: "12px" } },
-					h("strong", { style: { fontSize: "16px" } }, "记忆"),
+					{ style: { ...row, justifyContent: "space-between", marginBottom: "2px" } },
+					h(
+						"div",
+						{ style: row },
+						h("span", { style: title }, "记忆"),
+						pendingCount ? h("span", { style: { ...muted, color: "#b3261e" } }, `${pendingCount} 条待确认`) : null,
+					),
 					h(
 						"div",
 						{ style: row },
@@ -729,7 +814,7 @@ window.__ModuleLoader__.load({
 						h(
 							"button",
 							{
-								style: smallBtn,
+								style: ghostBtn,
 								disabled: busy,
 								onClick: () => {
 									void refresh();
@@ -739,65 +824,28 @@ window.__ModuleLoader__.load({
 						),
 					),
 				),
+				h("div", { style: note }, "写入立即生效；本会话下一轮可见。"),
+				error ? h("div", { style: { ...muted, color: "#b3261e", marginBottom: "10px" } }, error) : null,
+				h(TrackTabs, { tracks, active: activeKey, onSelect: setActiveTrack }),
+				activeView ? h(TrackSection, { target: activeKey, title: activeMeta.title, view: activeView, busy, onWrite }) : null,
+				h(PendingSection, { items: state.pending, busy, onDecide, error: "", notice: "" }),
 				h(
-					"div",
-					{ style: { ...muted, marginBottom: "14px" } },
-					"写入立即落盘；记忆块作为运行时上下文消息注入，内容变化时会在对话尾部追加新消息，本会话内写入下一轮即可见。",
+					"details",
+					{ style: detailsBox },
+					h(
+						"summary",
+						{ style: detailsSummary },
+						`更多 · 建议 ${suggestionCount} · 回顾 ${reviewCount} · 变更 ${writeCount}${conflictCount ? ` · 疑似重复 ${conflictCount}` : ""}`,
+					),
+					h(SuggestionsSection, { items: state.suggestions, busy, onDecide: onSuggest }),
+					reviewCount ? h(ReviewsSection, { items: state.reviews }) : null,
+					writeCount ? h(WritesSection, { items: state.writes, busy, onWrite }) : null,
+					conflictCount ? h(ConflictsSection, { items: state.conflicts }) : null,
+					h(SyncSection, { busy, onMerged: refresh }),
 				),
-				error
-					? h(
-							"div",
-							{
-								style: {
-									...card,
-									borderColor: "rgba(179,38,30,0.6)",
-									color: "#b3261e",
-									padding: "10px 12px",
-								},
-							},
-							error,
-						)
-					: null,
-				user ? h(StoreSection, { target: "user", title: "USER PROFILE · 用户是谁", subtitle: "偏好、期望、背景；一条事实只进一个库。", view: user, busy, onWrite }) : null,
-				memory ? h(StoreSection, { target: "memory", title: "MEMORY · 我的工作笔记", subtitle: "环境事实、工具怪癖、项目约定与路径。", view: memory, busy, onWrite }) : null,
-				key
-					? h(StoreSection, {
-							target: "key",
-							title: "KEY · 当前项目/分支要点",
-							subtitle: "按项目路径隔离并按 git 分支过滤；会注入上下文。",
-							view: key,
-							busy,
-							onWrite,
-						})
-					: null,
-				project
-					? h(StoreSection, {
-							target: "project",
-							title: "PROJECT LOG · 项目日志",
-							subtitle: "按项目路径隔离，作为工作日志，不注入上下文。",
-							view: project,
-							busy,
-							onWrite,
-						})
-					: null,
-				daily
-					? h(StoreSection, {
-							target: "daily",
-							title: "DAILY LOG · 每日日志",
-							subtitle: "按日期分文件，作为每日工作日志，不注入上下文。",
-							view: daily,
-							busy,
-							onWrite,
-						})
-					: null,
-				h(PendingSection, { items: state.pending, busy, onDecide, error, notice }),
-				h(SuggestionsSection, { items: state.suggestions, busy, onDecide: onSuggest }),
-				h(ReviewsSection, { items: state.reviews }),
-				h(WritesSection, { items: state.writes, busy, onWrite }),
-				h(ConflictsSection, { items: state.conflicts }),
-				h(SyncSection, { busy, onMerged: refresh }),
 			);
 		}
+
 
 		/* ----------------------------- tool call rows ---------------------------- */
 

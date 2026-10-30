@@ -300,9 +300,19 @@ test("面板的「最近变更」：单条有撤销按钮，batch 提示不可�
 	assert.match(text, /批量操作不可撤销/);
 });
 
-test("面板没有 review 记录时给出空态文案", async () => {
+test("面板用标签页一次只展示一条轨，并显示各轨条数", async () => {
 	const text = await renderPanel(panelState());
-	assert.match(text, /还没有后台 review 记录/);
+	assert.match(text, /记忆/);
+	assert.match(text, /用户/);
+	assert.match(text, /MEMORY · 我的工作笔记/);
+	assert.doesNotMatch(text, /USER PROFILE · 用户是谁/);
+});
+test("面板没有 review / 变更记录时隐藏这两个区块，只留同步入口", async () => {
+	const text = await renderPanel(panelState());
+	assert.doesNotMatch(text, /最近 review/);
+	assert.doesNotMatch(text, /最近变更/);
+	assert.match(text, /更多/);
+	assert.match(text, /同步/);
 });
 
 test("面板在 state 带 suggestions 时渲染建议区块与采纳/丢弃按钮", async () => {
