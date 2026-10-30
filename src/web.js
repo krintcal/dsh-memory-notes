@@ -10,7 +10,7 @@
  * 兜住，这里只负责「不是本机浏览器就别进」。
  */
 import { MemoryError } from './store.js';
-import { applyRecord, summarizePending } from './pending.js';
+import { applyRecord, pendingStaleness, summarizePending } from './pending.js';
 import { exportBundle, mergeBundle } from './sync.js';
 import { findConflictGroups } from './conflicts.js';
 
@@ -92,7 +92,7 @@ export function createWebApi({ store, pending, reviewLog, writeLog, suggestions,
 
   function pendingItems() {
     if (!pendingEnabled) return [];
-    return pending.list().map(summarizePending);
+    return pending.list().map((record) => ({ ...summarizePending(record), ...pendingStaleness(store, record) }));
   }
 
   function suggestionItems() {

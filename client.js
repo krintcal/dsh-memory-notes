@@ -224,7 +224,7 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		function PendingSection({ items, busy, onDecide }) {
+		function PendingSection({ items, busy, onDecide, error, notice }) {
 			if (!Array.isArray(items) || items.length === 0) return null;
 			return h(
 				"section",
@@ -238,7 +238,7 @@ window.__ModuleLoader__.load({
 				h(
 					"div",
 					{ style: muted, marginBottom: "10px" },
-					"后台 review 想删除或改写条目，需在这里批准；条目自提案后已变则会拒绝（stale）。",
+					"后台 review 想删除或改写条目，需在这里批准；条目自提案后已变则会标记「已过期」，只能丢弃。",
 				),
 				items.map((item) =>
 					h(
@@ -247,7 +247,18 @@ window.__ModuleLoader__.load({
 						h(
 							"div",
 							{ style: { ...row, justifyContent: "space-between", marginBottom: "4px" } },
-							h("span", { style: { fontSize: "13px" } }, `${item.action} · ${item.target}`),
+							h(
+								"div",
+								{ style: row },
+								h("span", { style: { fontSize: "13px" } }, `${item.action} · ${item.target}`),
+								item.stale
+									? h(
+											"span",
+											{ style: { ...muted, color: "#b3261e" }, title: item.stale_reason || "" },
+											"已过期",
+										)
+									: null,
+							),
 							h(
 								"div",
 								{ style: row },
@@ -255,7 +266,8 @@ window.__ModuleLoader__.load({
 									"button",
 									{
 										style: primaryBtn,
-										disabled: busy,
+										disabled: busy || Boolean(item.stale),
+										title: item.stale ? item.stale_reason || "条目已变，这条提案无法再应用" : "",
 										onClick: () => onDecide({ id: item.id, decision: "apply" }),
 									},
 									"批准",
@@ -267,6 +279,13 @@ window.__ModuleLoader__.load({
 								),
 							),
 						),
+						item.stale
+							? h(
+									"div",
+									{ style: { ...muted, color: "#b3261e", marginTop: "4px" } },
+									`${item.stale_reason || "条目自提案后已变"}；这条提案无法再应用，点「丢弃」清理即可。`,
+								)
+							: null,
 						item.old_text
 							? h(
 									"div",
@@ -300,6 +319,10 @@ window.__ModuleLoader__.load({
 							: null,
 					),
 				),
+				error
+					? h("div", { style: { color: "#b3261e", fontSize: "12px", marginTop: "6px" } }, error)
+					: null,
+				!error && notice ? h("div", { style: { ...muted, fontSize: "12px", marginTop: "6px" } }, notice) : null,
 			);
 		}
 
@@ -767,7 +790,7 @@ window.__ModuleLoader__.load({
 							onWrite,
 						})
 					: null,
-				h(PendingSection, { items: state.pending, busy, onDecide }),
+				h(PendingSection, { items: state.pending, busy, onDecide, error, notice }),
 				h(SuggestionsSection, { items: state.suggestions, busy, onDecide: onSuggest }),
 				h(ReviewsSection, { items: state.reviews }),
 				h(WritesSection, { items: state.writes, busy, onWrite }),

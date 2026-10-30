@@ -90,6 +90,22 @@ test('pending：批准后按 pin 的条目重放，记录被删掉', () => {
   assert.ok(PENDING_ID_RE.test(saved.id));
 });
 
+test('state：pin 的条目已变 → pending 条目带 stale 标记，面板据此只允许丢弃', () => {
+  const { store, pending, api } = fixture();
+  store.add('user', 'User prefers long answers');
+  const { id } = pending.save({
+    target: 'user',
+    action: 'remove',
+    old_text: 'User prefers long answers',
+    matched_entry: 'User prefers long answers',
+  });
+  assert.equal(api.state().pending[0].stale, false, 'fresh 记录不该被判 stale');
+  store.patch('user', 'long answers', 'short answers');
+  const staleItem = api.state().pending.find((item) => item.id === id);
+  assert.equal(staleItem.stale, true);
+  assert.match(String(staleItem.stale_reason), /long answers/);
+});
+
 test('pending：条目在提案后被改过 → stale 拒绝，记录保留', () => {
   const { store, pending, api } = fixture();
   store.add('user', 'User prefers long answers');

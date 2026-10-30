@@ -22,6 +22,32 @@ export function hasDestructive(operations) {
   return operations.some((op) => op && typeof op === 'object' && DESTRUCTIVE_ACTIONS.has(op.action));
 }
 
+/**
+ * 0.12.3：面板在渲染前先给每条 pending 打「已过期」标记——pin 住的条目若已不在
+ * 当前库里，批准必然 stale 失败，留着「批准」按钮只会让人以为点不动。
+ */
+export function pendingStaleness(store, record) {
+  const target = record && typeof record.target === 'string' ? record.target : '';
+  if (!target) return { stale: false };
+  let current;
+  try {
+    current = store.entries(target);
+  } catch {
+    return { stale: false };
+  }
+  const ops = record.action === 'batch' ? record.operations ?? [] : [record];
+  for (const op of ops) {
+    if (!op || !DESTRUCTIVE_ACTIONS.has(op.action)) continue;
+    const pinned = op.matched_entry;
+    if (typeof pinned !== 'string' || !pinned) continue;
+    if (!current.includes(pinned)) {
+      const preview = pinned.length > 80 ? `${pinned.slice(0, 80)}…` : pinned;
+      return { stale: true, stale_reason: `条目自提案后已变：${preview}` };
+    }
+  }
+  return { stale: false };
+}
+
 export function createPendingStore(dir) {
   const enabled = typeof dir === 'string' && dir.length > 0;
 
