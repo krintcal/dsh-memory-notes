@@ -37,6 +37,7 @@ window.__ModuleLoader__.load({
 				link: "var(--dsw-alias-link, #6b7280)",
 				toastBg: "var(--dsw-alias-toast-bg, rgba(32,32,32,0.94))",
 				toastLabel: "var(--dsw-alias-toast-label, #ffffff)",
+				mask: "var(--dsw-alias-bg-mask, rgba(0,0,0,0.35))",
 				dangerOnDark: "#ffb4ab",
 
 			},
@@ -202,8 +203,52 @@ window.__ModuleLoader__.load({
 		const entryRow = { display: "flex", alignItems: "flex-start", gap: T.space[4], padding: `${T.space[3]} ${T.space[4]}`, borderRadius: T.radius.md, borderBottom: `1px solid ${T.border.subtle}`, width: "100%", boxSizing: "border-box" };
 		const entryText = { flex: "1 1 auto", minWidth: 0, fontSize: T.font.md, lineHeight: T.line.base, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "42px", overflow: "hidden", cursor: "pointer" };
 		const ghostBtn = { font: "inherit", fontSize: T.font.xs, padding: `${T.space[1]} ${T.space[3]}`, border: "none", borderRadius: T.radius.sm, background: "transparent", color: "inherit", opacity: 0.55, cursor: "pointer" };
-		const detailsBox = { marginTop: T.space[9], borderTop: `1px solid ${T.border.subtle}`, paddingTop: T.space[5] };
-		const detailsSummary = { fontSize: T.font.sm, opacity: 0.6, cursor: "pointer", userSelect: "none", marginBottom: T.space[5] };
+		const statGroup = { display: "flex", alignItems: "center", flexWrap: "wrap", gap: T.space[5] };
+		const statText = { fontSize: T.font.sm, opacity: 0.66 };
+		const statBadge = {
+			display: "inline-block",
+			minWidth: T.space[4],
+			marginLeft: T.space[2],
+			padding: `0 ${T.space[2]}`,
+			borderRadius: T.radius.pill,
+			background: T.color.fillQuiet,
+			fontSize: T.font.xs,
+			lineHeight: T.line.pixel,
+			textAlign: "center",
+		};
+		const ringColor = (percent) => (percent >= 90 ? T.color.danger : percent >= 75 ? T.color.warn : T.color.success);
+		const budgetRing = (percent) => {
+			const clamped = Math.max(0, Math.min(100, percent));
+			return {
+				display: "inline-flex",
+				alignItems: "center",
+				justifyContent: "center",
+				width: T.space[8],
+				height: T.space[8],
+				borderRadius: T.radius.pill,
+				background: `conic-gradient(${ringColor(clamped)} ${clamped}%, ${T.color.fill} 0)`,
+				flex: "0 0 auto",
+			};
+		};
+		const budgetRingHole = { width: T.space[6], height: T.space[6], borderRadius: T.radius.pill, background: T.color.bgBase };
+		const drawerMask = { position: "fixed", inset: 0, background: T.color.mask, zIndex: 39 };
+		const drawerPanel = {
+			position: "fixed",
+			top: 0,
+			right: 0,
+			bottom: 0,
+			width: "min(420px, 92vw)",
+			boxSizing: "border-box",
+			background: T.color.bgBase,
+			borderLeft: `1px solid ${T.border.subtle}`,
+			boxShadow: T.shadow.pop,
+			overflow: "auto",
+			padding: T.space[9],
+			zIndex: 40,
+		};
+		const drawerHeader = { ...row, justifyContent: "space-between", marginBottom: T.space[7] };
+		const drawerNav = { ...tabBar, marginBottom: T.space[7] };
+		const drawerEmpty = { ...muted, marginTop: T.space[5] };
 
 		const TRACK_META = [
 			{
@@ -292,7 +337,7 @@ window.__ModuleLoader__.load({
 			color: T.color.toastLabel,
 			fontSize: T.font.md,
 			boxShadow: T.shadow.pop,
-			zIndex: 9999,
+			zIndex: 60,
 		};
 		const toastBtn = { ...smallBtn, color: "inherit", border: `1px solid ${T.border.onDark}`, padding: `${T.space[1]} ${T.space[4]}` };
 
@@ -1014,6 +1059,93 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		function DiagnosticsDrawer({ open, section, onSection, onClose, counts, children }) {
+			const closeRef = react.useRef(null);
+
+			react.useEffect(() => {
+				if (!open) return undefined;
+				const node = closeRef.current;
+				if (node && typeof node.focus === "function") node.focus();
+				return undefined;
+			}, [open]);
+
+			react.useEffect(() => {
+				if (!open) return undefined;
+				if (typeof document === "undefined" || !document.body || !document.body.style) return undefined;
+				const previous = document.body.style.overflow;
+				document.body.style.overflow = "hidden";
+				return () => {
+					document.body.style.overflow = previous;
+				};
+			}, [open]);
+
+			if (!open) return null;
+
+			const tabs = [
+				{ key: "history", label: "历史", count: (counts && counts.history) || 0 },
+				{ key: "conflicts", label: "冲突", count: (counts && counts.conflicts) || 0 },
+				{ key: "sync", label: "同步", count: 0 },
+			];
+
+			return h(
+				"div",
+				{ "data-dsh-memory-notes-drawer": "" },
+				h("div", { style: drawerMask, "aria-hidden": "true", onClick: onClose }),
+				h(
+					"div",
+					{
+						role: "dialog",
+						"aria-modal": "false",
+						"aria-label": "诊断面板",
+						style: drawerPanel,
+						tabIndex: -1,
+						onKeyDown: (event) => {
+							if (event && event.key === "Escape") {
+								if (typeof event.preventDefault === "function") event.preventDefault();
+								onClose();
+							}
+						},
+					},
+					h(
+						"div",
+						{ style: drawerHeader },
+						h("strong", { style: { fontSize: T.font.lg } }, "诊断"),
+						h(
+							"button",
+							withFocus({
+								ref: closeRef,
+								type: "button",
+								style: ghostBtn,
+								"aria-label": "关闭诊断面板",
+								onClick: onClose,
+							}),
+							"关闭",
+						),
+					),
+					h(
+						"div",
+						{ style: drawerNav, role: "tablist", "aria-label": "诊断分类" },
+						tabs.map((tab) =>
+							h(
+								"button",
+								withFocus({
+									key: tab.key,
+									type: "button",
+									role: "tab",
+									"aria-selected": section === tab.key,
+									style: section === tab.key ? tabActive : tabBase,
+									onClick: () => onSection(tab.key),
+								}),
+								tab.label,
+								tab.count ? h("span", { style: tabCount }, String(tab.count)) : null,
+							),
+						),
+					),
+					h("div", { style: { marginTop: T.space[5] } }, children),
+				),
+			);
+		}
+
 		function PanelPage() {
 			const [state, setState] = react.useState(null);
 			const [error, setError] = react.useState("");
@@ -1028,6 +1160,8 @@ window.__ModuleLoader__.load({
 			const [searchState, setSearchState] = react.useState({ status: "", results: [], error: "" });
 			const [undoEntry, setUndoEntry] = react.useState(null);
 			const [undoState, setUndoState] = react.useState("");
+			const [drawerOpen, setDrawerOpen] = react.useState(false);
+			const [drawerSection, setDrawerSection] = react.useState("history");
 			const undoTimerRef = react.useRef(null);
 			const undoDoneTimerRef = react.useRef(null);
 
@@ -1226,18 +1360,50 @@ window.__ModuleLoader__.load({
 			const activeMeta = TRACK_META.find((meta) => meta.key === activeKey) || TRACK_META[0];
 			const activeView = activeKey && state.targets ? state.targets[activeKey] : null;
 			const pendingCount = Array.isArray(state.pending) ? state.pending.length : 0;
-			const suggestionCount = Array.isArray(state.suggestions) ? state.suggestions.length : 0;
 			const reviewCount = Array.isArray(state.reviews) ? state.reviews.length : 0;
 			const writeCount = Array.isArray(state.writes) ? state.writes.length : 0;
 			const conflictCount = Array.isArray(state.conflicts) ? state.conflicts.length : 0;
 			const searchResults = searchState && Array.isArray(searchState.results) ? searchState.results : [];
+			const totalCount = tracks.reduce((sum, track) => sum + track.count, 0);
+			const injectionKeys = ["memory", "user", "key"].filter((key) => state.targets && state.targets[key]);
+			const injectionDetail = ["memory", "user", "key"]
+				.map((key) => {
+					const view = state.targets && state.targets[key];
+					return `${TARGET_LABELS[key]} ${Math.round((view && view.percent) || 0)}%`;
+				})
+				.join(" · ");
+			const injectionMax = injectionKeys.reduce(
+				(max, key) => Math.max(max, (state.targets[key] && state.targets[key].percent) || 0),
+				0,
+			);
+			const diagnosticCount = reviewCount + writeCount + conflictCount;
+			const openDrawer = () => {
+				const next = reviewCount + writeCount > 0 ? "history" : conflictCount > 0 ? "conflicts" : "sync";
+				setDrawerSection(next);
+				setDrawerOpen(true);
+			};
+			const drawerBody =
+				drawerSection === "conflicts"
+					? conflictCount
+						? h(ConflictsSection, { items: state.conflicts })
+						: h("p", { style: drawerEmpty }, "暂无冲突。")
+					: drawerSection === "sync"
+						? h(SyncSection, { busy, onMerged: refresh })
+						: reviewCount || writeCount
+							? h(
+									"div",
+									null,
+									reviewCount ? h(ReviewsSection, { items: state.reviews }) : null,
+									writeCount ? h(WritesSection, { items: state.writes, busy, onWrite }) : null,
+								)
+							: h("p", { style: drawerEmpty }, "暂无记录。");
 
 			return h(
 				"div",
 				{ "data-dsh-memory-notes-view": "", style: panel },
 				h(
 					"div",
-					{ style: { ...row, justifyContent: "space-between", marginBottom: T.space[1] } },
+					{ style: { ...row, justifyContent: "space-between", flexWrap: "wrap", gap: T.space[5], marginBottom: T.space[1] } },
 					h(
 						"div",
 						{ style: { ...row, flexWrap: "wrap" } },
@@ -1269,12 +1435,36 @@ window.__ModuleLoader__.load({
 							}),
 							searchState?.status === "loading" ? "搜索中…" : "搜索",
 						),
-						pendingCount ? h("span", { style: { ...muted, color: T.color.danger } }, `${pendingCount} 条待确认`) : null,
 					),
 					h(
 						"div",
-						{ style: row },
-						notice && !error ? h("span", { style: muted }, notice) : null,
+						{ style: statGroup },
+						totalCount > 0 ? h("span", { style: statText }, `共 ${totalCount} 条`) : null,
+						injectionKeys.length > 0
+							? h(
+									"span",
+									{
+										role: "img",
+										title: injectionDetail,
+										"aria-label": injectionDetail,
+										style: budgetRing(injectionMax),
+									},
+									h("span", { style: budgetRingHole }),
+								)
+							: null,
+						pendingCount > 0 ? h("span", { style: { ...statText, color: T.color.danger } }, `待确认 ${pendingCount}`) : null,
+						h(
+							"button",
+							withFocus({
+								style: ghostBtn,
+								"aria-label": "打开诊断面板",
+								title: "回顾与变更历史 · 冲突 · 同步",
+								onClick: openDrawer,
+							}),
+							"历史 / 同步",
+							diagnosticCount > 0 ? h("span", { style: statBadge }, String(diagnosticCount)) : null,
+						),
+						notice && !error ? h("span", { style: statText }, notice) : null,
 						h(
 							"button",
 							withFocus({
@@ -1350,20 +1540,15 @@ window.__ModuleLoader__.load({
 						})
 					: null,
 				h(PendingSection, { items: state.pending, busy, onDecide, error: "", notice: "" }),
-				h(
-					"details",
-					{ style: detailsBox },
-					h(
-						"summary",
-						{ style: detailsSummary },
-						`更多 · 建议 ${suggestionCount} · 回顾 ${reviewCount} · 变更 ${writeCount}${conflictCount ? ` · 疑似重复 ${conflictCount}` : ""}`,
-					),
-					h(SuggestionsSection, { items: state.suggestions, busy, onDecide: onSuggest }),
-					reviewCount ? h(ReviewsSection, { items: state.reviews }) : null,
-					writeCount ? h(WritesSection, { items: state.writes, busy, onWrite }) : null,
-					conflictCount ? h(ConflictsSection, { items: state.conflicts }) : null,
-					h(SyncSection, { busy, onMerged: refresh }),
-				),
+				h(SuggestionsSection, { items: state.suggestions, busy, onDecide: onSuggest }),
+				h(DiagnosticsDrawer, {
+					open: drawerOpen,
+					section: drawerSection,
+					onSection: setDrawerSection,
+					onClose: () => setDrawerOpen(false),
+					counts: { history: reviewCount + writeCount, conflicts: conflictCount },
+					children: drawerBody,
+				}),
 				undoEntry || undoState === "done"
 					? h(
 							"div",

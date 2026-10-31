@@ -260,9 +260,32 @@ function panelState(overrides = {}) {
 	};
 }
 
-async function renderPanel(state) {
+function panelHookArray(state, hookValues = []) {
+	const values = [
+		state,
+		"",
+		false,
+		"",
+		"",
+		null,
+		0,
+		"",
+		"",
+		{ status: "", results: [], error: "" },
+		null,
+		"",
+		false,
+		"history",
+	];
+	hookValues.forEach((value, index) => {
+		if (12 + index < values.length) values[12 + index] = value;
+	});
+	return values;
+}
+
+async function renderPanel(state, hookValues = []) {
 	const bundle = await loadBundle();
-	const exportsObject = bundle.factory(requireStub(panelReact([state, "", false, ""])));
+	const exportsObject = bundle.factory(requireStub(panelReact(panelHookArray(state, hookValues))));
 	const registrations = [];
 	exportsObject.apply(fakeCtx(registrations, []));
 	const main = registrations.find((entry) => entry.definition.name === "main");
@@ -276,6 +299,7 @@ test("面板在 state 带 reviews 时渲染「最近 review」", async () => {
 		panelState({
 			reviews: [{ id: "r1", summary: "MEMORY +1 ~0 -0 · USER +0 ~0 -0", finished_at: now }],
 		}),
+		[true, "history"],
 	);
 	assert.match(text, /最近 review/);
 	assert.match(text, /MEMORY \+1/);
@@ -293,6 +317,7 @@ test("面板的「最近变更」：单条有撤销按钮，batch 提示不可�
 				{ ts: now, action: "patch", target: "memory", before: "a", after: "b", batch: true },
 			],
 		}),
+		[true, "history"],
 	);
 	assert.match(text, /最近变更/);
 	assert.match(text, /fresh note/);
@@ -307,12 +332,12 @@ test("面板用标签页一次只展示一条轨，并显示各轨条数", async
 	assert.match(text, /MEMORY · 我的工作笔记/);
 	assert.doesNotMatch(text, /USER PROFILE · 用户是谁/);
 });
-test("面板没有 review / 变更记录时隐藏这两个区块，只留同步入口", async () => {
+test("面板没有 review / 变更记录时隐藏这两个区块，只留诊断入口", async () => {
 	const text = await renderPanel(panelState());
 	assert.doesNotMatch(text, /最近 review/);
 	assert.doesNotMatch(text, /最近变更/);
-	assert.match(text, /更多/);
-	assert.match(text, /同步/);
+	assert.doesNotMatch(text, /导出 JSON/);
+	assert.match(text, /历史 \/ 同步/);
 });
 
 test("过期的 pending 不再渲染「批准」，只留「丢弃这条过期提案」", async () => {
@@ -386,9 +411,9 @@ function collectNodes(node, predicate, out = []) {
 	return out;
 }
 
-async function renderPanelTree(state) {
+async function renderPanelTree(state, hookValues = []) {
 	const bundle = await loadBundle();
-	const exportsObject = bundle.factory(requireStub(panelReact([state, "", false, ""])));
+	const exportsObject = bundle.factory(requireStub(panelReact(panelHookArray(state, hookValues))));
 	const registrations = [];
 	exportsObject.apply(fakeCtx(registrations, []));
 	const main = registrations.find((entry) => entry.definition.name === "main");
@@ -680,4 +705,92 @@ test("撤销失败时在 toast 里显示红字原因", async () => {
 		),
 	);
 	assert.match(textOf(tree), /写回失败：磁盘只读/);
+});
+
+/* ---------------------- 0.16.0：诊断抽屉与头部统计 ---------------------- */
+
+test("关闭态不渲染诊断抽屉，打开后渲染 dialog 与三段导航", async () => {
+	const closedTree = await renderPanelTree(panelState());
+	assert.equal(
+		collectNodes(closedTree, (node) => node.props && node.props.role === "dialog").length,
+		0,
+		"closed drawer must not render a dialog node",
+	);
+	assert.equal(
+		collectNodes(closedTree, (node) => node.props && "data-dsh-memory-notes-drawer" in node.props).length,
+		0,
+		"closed drawer must not render the drawer container",
+	);
+
+	const tree = await renderPanelTree(panelState(), [true, "history"]);
+	const dialogs = collectNodes(tree, (node) => node.props && node.props.role === "dialog");
+	assert.equal(dialogs.length, 1);
+	assert.equal(dialogs[0].props["aria-label"], "诊断面板");
+	assert.equal(dialogs[0].props["aria-modal"], "false");
+	assert.ok(
+		collectNodes(tree, (node) => node.props && "data-dsh-memory-notes-drawer" in node.props).length >= 1,
+		"open drawer must expose the screenshot hook attribute",
+	);
+	const text = textOf(tree);
+	for (const label of ["历史", "冲突", "同步"]) assert.match(text, new RegExp(label));
+});
+
+test("诊断抽屉按段渲染：同步段有导出，冲突段列出冲突条目", async () => {
+	const syncText = await renderPanel(panelState(), [true, "sync"]);
+	assert.match(syncText, /导出 JSON/);
+
+	const conflictText = await renderPanel(
+		panelState({
+			conflicts: [{ target: "memory", similarity: 0.9, a: "conflict alpha", b: "conflict beta" }],
+		}),
+		[true, "conflicts"],
+	);
+	assert.match(conflictText, /conflict alpha/);
+});
+
+test("头部统计显示总条数、待确认为红字，预算环 aria-label 逐轨明细", async () => {
+	const state = panelState({
+		targets: {
+			memory: { entries: ["a", "b"], used: 12, limit: 2200, percent: 62, usage: "62% — 12/2,200 chars" },
+			user: { entries: ["c"], used: 4, limit: 1375, percent: 4, usage: "4% — 4/1,375 chars" },
+			key: { entries: [], used: 0, limit: 1375, percent: 0, usage: "0% — 0/1,375 chars" },
+		},
+		pending: [{ id: "p1", target: "memory", action: "add", content: "new" }],
+	});
+	const tree = await renderPanelTree(state);
+	const text = textOf(tree);
+	assert.match(text, /共 3 条/);
+	assert.match(text, /待确认 1/);
+
+	const ring = collectNodes(
+		tree,
+		(node) =>
+			node.props &&
+			typeof node.props["aria-label"] === "string" &&
+			/MEMORY \d+% · USER \d+% · KEY \d+%/.test(node.props["aria-label"]),
+	)[0];
+	assert.ok(ring, "header must render the budget ring with per-track detail");
+	assert.equal(ring.props.title, ring.props["aria-label"]);
+	assert.match(ring.props["aria-label"], /MEMORY 62% · USER 4% · KEY 0%/);
+});
+
+test("建议区块留在主区，不打开抽屉也能看到采纳/丢弃", async () => {
+	const text = await renderPanel(
+		panelState({
+			suggestions: [{ id: "s1", created_at: Date.now(), target: "memory", text: "main area suggestion" }],
+		}),
+	);
+	assert.match(text, /main area suggestion/);
+	assert.match(text, /采纳/);
+	assert.match(text, /丢弃/);
+});
+
+test("诊断抽屉历史段为空时显示「暂无记录。」", async () => {
+	const text = await renderPanel(panelState(), [true, "history"]);
+	assert.match(text, /暂无记录。/);
+});
+
+test("诊断抽屉冲突段为空时显示「暂无冲突。」", async () => {
+	const text = await renderPanel(panelState(), [true, "conflicts"]);
+	assert.match(text, /暂无冲突。/);
 });
