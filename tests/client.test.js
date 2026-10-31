@@ -35,6 +35,7 @@ function requireStub(react) {
 }
 
 let cachedBundle = null;
+let cachedPageSize = null;
 
 async function loadBundle() {
 	if (cachedBundle) return cachedBundle;
@@ -43,6 +44,7 @@ async function loadBundle() {
 	await import(CLIENT_ENTRY);
 	assert.equal(loaded.length, 1, "client bundle must call __ModuleLoader__.load once");
 	cachedBundle = loaded[0];
+	cachedPageSize = cachedBundle.factory(requireStub(fakeReact())).__test.PAGE_SIZE;
 	return cachedBundle;
 }
 
@@ -276,6 +278,7 @@ function panelHookArray(state, hookValues = []) {
 		"",
 		false,
 		"history",
+		cachedPageSize,
 	];
 	hookValues.forEach((value, index) => {
 		if (12 + index < values.length) values[12 + index] = value;
@@ -793,4 +796,41 @@ test("诊断抽屉历史段为空时显示「暂无记录。」", async () => {
 test("诊断抽屉冲突段为空时显示「暂无冲突。」", async () => {
 	const text = await renderPanel(panelState(), [true, "conflicts"]);
 	assert.match(text, /暂无冲突。/);
+});
+
+/* ---------------------- 0.17.0：分页窗口与差分刷新 ---------------------- */
+
+function manyEntriesState(count) {
+	return panelState({
+		targets: {
+			memory: {
+				entries: Array.from({ length: count }, (_, i) => `entry ${i}`),
+				used: 0,
+				limit: 2200,
+				percent: 0,
+				usage: `0% — 0/2,200 chars`,
+			},
+			user: { entries: [], used: 0, limit: 1375, percent: 0, usage: "0% — 0/1,375 chars" },
+		},
+	});
+}
+
+test("超过 30 条只渲染 30 张卡片 + 显示更多", async () => {
+	const text = await renderPanel(manyEntriesState(65));
+	assert.equal((text.match(/编辑/g) || []).length, 30);
+	assert.match(text, /显示更多（还有 35 条）/);
+});
+
+test("显示更多后渲染到 60 条", async () => {
+	const text = await renderPanel(manyEntriesState(65), [false, "history", 60]);
+	assert.equal((text.match(/编辑/g) || []).length, 60);
+	assert.match(text, /显示更多（还有 5 条）/);
+});
+
+test("差分刷新判等", async () => {
+	const bundle = await loadBundle();
+	const exportsObject = bundle.factory(requireStub(fakeReact()));
+	assert.equal(exportsObject.__test.PAGE_SIZE, 30);
+	assert.equal(exportsObject.__test.sameState({ a: 1 }, { a: 1 }), true);
+	assert.equal(exportsObject.__test.sameState({ a: 1 }, { a: 2 }), false);
 });

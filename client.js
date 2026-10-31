@@ -54,6 +54,7 @@ window.__ModuleLoader__.load({
 			},
 			line: { tight: 1.45, base: 1.5, loose: 1.6, pixel: "18px" },
 		};
+		const PAGE_SIZE = 30;
 
 		/* ------------------------------ API client ------------------------------ */
 
@@ -182,6 +183,9 @@ window.__ModuleLoader__.load({
 			height: "100%",
 			overflow: "auto",
 		};
+		function sameState(a, b) {
+			return JSON.stringify(a) === JSON.stringify(b);
+		}
 		const title = { fontSize: T.font.xl, fontWeight: 600, letterSpacing: "0.01em" };
 		const note = { fontSize: T.font.sm, opacity: 0.55, margin: `${T.space[3]} 0 ${T.space[7]}` };
 		const tabBar = { display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: T.space[1], marginBottom: T.space[7], borderBottom: `1px solid ${T.border.subtle}` };
@@ -628,7 +632,7 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		function TrackSection({ target, title: heading, hint, view, busyKey, savedKey, onWrite, onAdd, onEditingChange, onDeleted }) {
+		function TrackSection({ target, title: heading, hint, view, busyKey, savedKey, onWrite, onAdd, onEditingChange, onDeleted, limit, onMore }) {
 			const entries = Array.isArray(view.entries) ? view.entries : [];
 			const seen = new Map();
 			const keyed = entries.map((entry, index) => {
@@ -649,7 +653,7 @@ window.__ModuleLoader__.load({
 				h("div", { style: { ...row, marginBottom: T.space[5] } }, h("div", { style: thinTrack }, h("div", { style: barFill(view.percent) }))),
 				entries.length === 0
 					? h("div", { style: { ...muted, padding: `${T.space[3]} ${T.space[4]}`, lineHeight: T.line.loose } }, hint || "")
-					: keyed.map(({ entry, index, key }) =>
+					: keyed.slice(0, limit).map(({ entry, index, key }) =>
 							h(EntryCard, {
 								key,
 								target,
@@ -665,6 +669,22 @@ window.__ModuleLoader__.load({
 								onEditingChange,
 							}),
 						),
+				keyed.length > limit
+					? h(
+							"div",
+							{ style: { ...row, justifyContent: "center", marginBottom: T.space[3] } },
+							h(
+								"button",
+								{
+									type: "button",
+									style: ghostBtn,
+									"aria-label": `显示更多（还有 ${keyed.length - limit} 条）`,
+									onClick: () => onMore(),
+								},
+								`显示更多（还有 ${keyed.length - limit} 条）`,
+							),
+						)
+					: null,
 				h(AddEntry, {
 					target,
 					onAdd: (content) => onAdd({ target, action: "add", content }),
@@ -1162,8 +1182,15 @@ window.__ModuleLoader__.load({
 			const [undoState, setUndoState] = react.useState("");
 			const [drawerOpen, setDrawerOpen] = react.useState(false);
 			const [drawerSection, setDrawerSection] = react.useState("history");
+			const [pageLimit, setPageLimit] = react.useState(PAGE_SIZE);
 			const undoTimerRef = react.useRef(null);
+			const stateSigRef = react.useRef("");
 			const undoDoneTimerRef = react.useRef(null);
+
+			const applyState = react.useCallback((next) => {
+				stateSigRef.current = JSON.stringify(next);
+				setState(next);
+			}, []);
 
 			const onEditingChange = react.useCallback((delta) => {
 				const next = Math.max(0, editingCountRef.current + delta);
@@ -1221,6 +1248,9 @@ window.__ModuleLoader__.load({
 			const refresh = react.useCallback(async (silent = false) => {
 				try {
 					const data = await fetchJson(API.state);
+					const sig = JSON.stringify(data);
+					if (sig === stateSigRef.current) return data;
+					stateSigRef.current = sig;
 					setState(data);
 					setError("");
 					return data;
@@ -1269,7 +1299,7 @@ window.__ModuleLoader__.load({
 							if (!key) setError(message);
 							return { ok: false, error: message };
 						}
-						if (data && data.state) setState(data.state);
+						if (data && data.state) applyState(data.state);
 						else await refresh();
 						if (!key) {
 							setError("");
@@ -1481,7 +1511,14 @@ window.__ModuleLoader__.load({
 				),
 				h("div", { style: note }, "写入立即生效；本会话下一轮可见。"),
 				error ? h("div", { style: { ...muted, color: T.color.danger, marginBottom: T.space[5] } }, error) : null,
-				h(TrackTabs, { tracks, active: activeKey, onSelect: setActiveTrack }),
+				h(TrackTabs, {
+					tracks,
+					active: activeKey,
+					onSelect: (key) => {
+						setActiveTrack(key);
+						setPageLimit(PAGE_SIZE);
+					},
+				}),
 				searchState?.status
 					? h(
 							"section",
@@ -1517,6 +1554,7 @@ window.__ModuleLoader__.load({
 														style: searchResultRow,
 														onClick: () => {
 															setActiveTrack(item.target);
+															setPageLimit(PAGE_SIZE);
 															clearSearch();
 														},
 													}),
@@ -1537,6 +1575,8 @@ window.__ModuleLoader__.load({
 							onAdd: onAddEntry,
 							onEditingChange,
 							onDeleted: handleDeleted,
+							limit: pageLimit,
+							onMore: () => setPageLimit(pageLimit + PAGE_SIZE),
 						})
 					: null,
 				h(PendingSection, { items: state.pending, busy, onDecide, error: "", notice: "" }),
@@ -2052,6 +2092,7 @@ window.__ModuleLoader__.load({
 
 		exports.apply = apply;
 		exports.inject = ["slots", "layout"];
+		exports.__test = { PAGE_SIZE, sameState };
 		return module.exports;
 	},
 });
