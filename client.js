@@ -8,6 +8,52 @@ window.__ModuleLoader__.load({
 		let react_jsx_runtime = require("react/jsx-runtime");
 		const h = react.createElement;
 
+		/* ------------------------------ Design tokens ------------------------------ */
+		// 颜色走 DSH 主题变量（--dsw-alias-*，light/dark 由主题包切换），
+		// 第二参数是脱离宿主（单测/离线渲染）时的 fallback。
+		const T = {
+			font: { xs: "11px", sm: "12px", md: "13px", lg: "14px", xl: "15px" },
+			radius: { xs: "4px", sm: "6px", md: "8px", lg: "10px", pill: "999px" },
+			space: { 0: "0px", 1: "2px", 2: "4px", 3: "6px", 4: "8px", 5: "10px", 6: "12px", 7: "14px", 8: "16px", 9: "18px", 10: "20px", 12: "24px", 14: "28px", 28: "56px" },
+			color: {
+				text: "var(--dsw-alias-label-primary, #1f2328)",
+				textSecondary: "var(--dsw-alias-label-secondary, #4a5058)",
+				textTertiary: "var(--dsw-alias-label-tertiary, #6b7280)",
+				textDimmed: "var(--dsw-alias-label-dimmed, #6b7280)",
+				textCaption: "var(--dsw-alias-label-caption, #6b7280)",
+				bgBase: "var(--dsw-alias-bg-base, #ffffff)",
+				bgLayer1: "var(--dsw-alias-bg-layer-1, #f7f7f8)",
+				bgLayer2: "var(--dsw-alias-bg-layer-2, #f2f2f4)",
+				hoverSubtle: "var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,0.06))",
+				fillQuiet: "var(--dsw-alias-bg-layer-2, rgba(127,127,127,0.16))",
+				fill: "var(--dsw-alias-bg-skeleton, rgba(127,127,127,0.20))",
+				fillStrong: "var(--dsw-alias-interactive-bg-active, rgba(127,127,127,0.25))",
+				danger: "var(--dsw-alias-state-error-primary, #b3261e)",
+				dangerBg: "var(--dsw-alias-interactive-bg-hover-danger, rgba(179,38,30,0.12))",
+				success: "var(--dsw-alias-state-success-primary, #2e7d32)",
+				successBg: "var(--dsw-alias-state-success-tertiary, rgba(46,125,50,0.14))",
+				warn: "var(--dsw-alias-state-warn-primary, #d9a441)",
+				brand: "var(--dsw-alias-brand-primary, #b3261e)",
+				link: "var(--dsw-alias-link, #6b7280)",
+				toastBg: "var(--dsw-alias-toast-bg, rgba(32,32,32,0.94))",
+				toastLabel: "var(--dsw-alias-toast-label, #ffffff)",
+				dangerOnDark: "#ffb4ab",
+
+			},
+			border: {
+				subtle: "var(--dsw-alias-border-l1, rgba(127,127,127,0.22))",  // 细线：分隔、卡片
+				base: "var(--dsw-alias-border-l2, rgba(127,127,127,0.32))",
+				strong: "var(--dsw-alias-border-l3, rgba(127,127,127,0.45))",
+				stronger: "var(--dsw-alias-border-l4, rgba(127,127,127,0.70))",
+				danger: "var(--dsw-alias-state-error-primary, #b3261e)",
+				onDark: "rgba(255,255,255,0.55)",
+			},
+			shadow: {
+				pop: "0 6px 24px var(--dsw-alias-bg-mask-drop, rgba(0,0,0,0.28))",
+			},
+			line: { tight: 1.45, base: 1.5, loose: 1.6, pixel: "18px" },
+		};
+
 		/* ------------------------------ API client ------------------------------ */
 
 		// 文档相对路径（无前导斜杠）：GUI 用 <base href="./">，根绝对路径会逃出
@@ -46,30 +92,30 @@ window.__ModuleLoader__.load({
 		/* --------------------------------- styles ------------------------------- */
 
 		const card = {
-			border: "1px solid rgba(127,127,127,0.32)",
-			borderRadius: "10px",
-			padding: "14px 16px",
-			marginBottom: "14px",
+			border: `1px solid ${T.border.base}`,
+			borderRadius: T.radius.lg,
+			padding: `${T.space[7]} ${T.space[8]}`,
+			marginBottom: T.space[7],
 			background: "transparent",
 		};
-		const row = { display: "flex", alignItems: "center", gap: "10px" };
-		const muted = { opacity: 0.66, fontSize: "12px" };
+		const row = { display: "flex", alignItems: "center", gap: T.space[5] };
+		const muted = { opacity: 0.66, fontSize: T.font.sm };
 		const smallBtn = {
 			font: "inherit",
-			fontSize: "12px",
-			padding: "4px 10px",
-			borderRadius: "7px",
-			border: "1px solid rgba(127,127,127,0.4)",
+			fontSize: T.font.sm,
+			padding: `${T.space[2]} ${T.space[5]}`,
+			borderRadius: T.radius.md,
+			border: `1px solid ${T.border.strong}`,
 			background: "transparent",
 			color: "inherit",
 			cursor: "pointer",
 		};
 		const primaryBtn = {
 			...smallBtn,
-			border: "1px solid rgba(127,127,127,0.7)",
-			background: "rgba(127,127,127,0.16)",
+			border: `1px solid ${T.border.stronger}`,
+			background: T.color.fillQuiet,
 		};
-		const dangerBtn = { ...smallBtn, border: "1px solid rgba(179,38,30,0.7)", color: "#b3261e" };
+		const dangerBtn = { ...smallBtn, border: `1px solid ${T.border.danger}`, color: T.color.danger };
 		const focusRing = { outline: "2px solid currentColor", outlineOffset: "1px" };
 		const focusShadow = "0 0 0 2px currentColor";
 		function withFocus(props) {
@@ -102,32 +148,32 @@ window.__ModuleLoader__.load({
 			minHeight: "52px",
 			resize: "vertical",
 			font: "inherit",
-			fontSize: "13px",
-			lineHeight: 1.45,
+			fontSize: T.font.md,
+			lineHeight: T.line.tight,
 			color: "inherit",
 			background: "transparent",
-			border: "1px solid rgba(127,127,127,0.35)",
-			borderRadius: "8px",
-			padding: "8px 10px",
+			border: `1px solid ${T.border.base}`,
+			borderRadius: T.radius.md,
+			padding: `${T.space[4]} ${T.space[5]}`,
 			outline: "none",
 		};
 		const barTrack = {
 			height: "5px",
-			borderRadius: "999px",
-			background: "rgba(127,127,127,0.25)",
+			borderRadius: T.radius.pill,
+			background: T.color.fillStrong,
 			overflow: "hidden",
 			flex: "1 1 auto",
 		};
 		const barFill = (percent) => ({
 			height: "100%",
 			width: `${Math.max(0, Math.min(100, percent))}%`,
-			borderRadius: "999px",
-			background: percent >= 90 ? "#b3261e" : percent >= 75 ? "#d9a441" : "#4a9d6a",
+			borderRadius: T.radius.pill,
+			background: percent >= 90 ? T.color.danger : percent >= 75 ? T.color.warn : T.color.success,
 			transition: "width 160ms ease",
 		});
 
 		const panel = {
-			padding: "20px 28px 56px",
+			padding: `${T.space[10]} ${T.space[14]} ${T.space[28]}`,
 			maxWidth: "1280px",
 			margin: "0",
 			width: "100%",
@@ -135,13 +181,13 @@ window.__ModuleLoader__.load({
 			height: "100%",
 			overflow: "auto",
 		};
-		const title = { fontSize: "15px", fontWeight: 600, letterSpacing: "0.01em" };
-		const note = { fontSize: "12px", opacity: 0.55, margin: "6px 0 14px" };
-		const tabBar = { display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: "2px", marginBottom: "14px", borderBottom: "1px solid rgba(127,127,127,0.22)" };
+		const title = { fontSize: T.font.xl, fontWeight: 600, letterSpacing: "0.01em" };
+		const note = { fontSize: T.font.sm, opacity: 0.55, margin: `${T.space[3]} 0 ${T.space[7]}` };
+		const tabBar = { display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: T.space[1], marginBottom: T.space[7], borderBottom: `1px solid ${T.border.subtle}` };
 		const tabBase = {
 			font: "inherit",
-			fontSize: "12px",
-			padding: "6px 10px",
+			fontSize: T.font.sm,
+			padding: `${T.space[3]} ${T.space[5]}`,
 			marginBottom: "-1px",
 			border: "none",
 			borderBottom: "2px solid transparent",
@@ -151,13 +197,13 @@ window.__ModuleLoader__.load({
 			opacity: 0.55,
 		};
 		const tabActive = { ...tabBase, opacity: 1, borderBottom: "2px solid currentColor" };
-		const tabCount = { marginLeft: "5px", fontSize: "11px", opacity: 0.6 };
-		const thinTrack = { height: "3px", borderRadius: "999px", background: "rgba(127,127,127,0.2)", overflow: "hidden", flex: "1 1 auto" };
-		const entryRow = { display: "flex", alignItems: "flex-start", gap: "8px", padding: "6px 8px", borderRadius: "7px", borderBottom: "1px solid rgba(127,127,127,0.14)", width: "100%", boxSizing: "border-box" };
-		const entryText = { flex: "1 1 auto", minWidth: 0, fontSize: "13px", lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "42px", overflow: "hidden", cursor: "pointer" };
-		const ghostBtn = { font: "inherit", fontSize: "11px", padding: "2px 6px", border: "none", borderRadius: "6px", background: "transparent", color: "inherit", opacity: 0.55, cursor: "pointer" };
-		const detailsBox = { marginTop: "18px", borderTop: "1px solid rgba(127,127,127,0.22)", paddingTop: "10px" };
-		const detailsSummary = { fontSize: "12px", opacity: 0.6, cursor: "pointer", userSelect: "none", marginBottom: "10px" };
+		const tabCount = { marginLeft: T.space[2], fontSize: T.font.xs, opacity: 0.6 };
+		const thinTrack = { height: "3px", borderRadius: T.radius.pill, background: T.color.fill, overflow: "hidden", flex: "1 1 auto" };
+		const entryRow = { display: "flex", alignItems: "flex-start", gap: T.space[4], padding: `${T.space[3]} ${T.space[4]}`, borderRadius: T.radius.md, borderBottom: `1px solid ${T.border.subtle}`, width: "100%", boxSizing: "border-box" };
+		const entryText = { flex: "1 1 auto", minWidth: 0, fontSize: T.font.md, lineHeight: T.line.base, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "42px", overflow: "hidden", cursor: "pointer" };
+		const ghostBtn = { font: "inherit", fontSize: T.font.xs, padding: `${T.space[1]} ${T.space[3]}`, border: "none", borderRadius: T.radius.sm, background: "transparent", color: "inherit", opacity: 0.55, cursor: "pointer" };
+		const detailsBox = { marginTop: T.space[9], borderTop: `1px solid ${T.border.subtle}`, paddingTop: T.space[5] };
+		const detailsSummary = { fontSize: T.font.sm, opacity: 0.6, cursor: "pointer", userSelect: "none", marginBottom: T.space[5] };
 
 		const TRACK_META = [
 			{
@@ -191,25 +237,25 @@ window.__ModuleLoader__.load({
 				hint: "当天小结（同上），例：『今天修完按条目 busy 与编辑期暂停轮询』",
 			},
 		];
-		const flatSection = { marginBottom: "16px" };
-		const itemBox = { padding: "8px 10px", borderRadius: "8px", marginBottom: "8px", background: "rgba(127,127,127,0.06)" };
+		const flatSection = { marginBottom: T.space[8] };
+		const itemBox = { padding: `${T.space[4]} ${T.space[5]}`, borderRadius: T.radius.md, marginBottom: T.space[4], background: T.color.hoverSubtle };
 		const diffLine = (kind) => ({
 			...muted,
 			whiteSpace: "pre-wrap",
 			wordBreak: "break-word",
-			padding: "2px 6px",
-			marginTop: "2px",
-			borderRadius: "4px",
-			background: kind === "remove" ? "rgba(179,38,30,0.12)" : "rgba(46,125,50,0.14)",
-			color: kind === "remove" ? "#b3261e" : "#2e7d32",
+			padding: `${T.space[1]} ${T.space[3]}`,
+			marginTop: T.space[1],
+			borderRadius: T.radius.xs,
+			background: kind === "remove" ? T.color.dangerBg : T.color.successBg,
+			color: kind === "remove" ? T.color.danger : T.color.success,
 		});
 		const searchInput = {
 			font: "inherit",
-			fontSize: "12px",
-			padding: "4px 8px",
+			fontSize: T.font.sm,
+			padding: `${T.space[2]} ${T.space[4]}`,
 			minWidth: "160px",
-			borderRadius: "7px",
-			border: "1px solid rgba(127,127,127,0.4)",
+			borderRadius: T.radius.md,
+			border: `1px solid ${T.border.strong}`,
 			background: "transparent",
 			color: "inherit",
 			cursor: "text",
@@ -220,11 +266,11 @@ window.__ModuleLoader__.load({
 			boxSizing: "border-box",
 			textAlign: "left",
 			font: "inherit",
-			fontSize: "13px",
-			lineHeight: 1.5,
-			padding: "6px 8px",
+			fontSize: T.font.md,
+			lineHeight: T.line.base,
+			padding: `${T.space[3]} ${T.space[4]}`,
 			border: "none",
-			borderBottom: "1px solid rgba(127,127,127,0.14)",
+			borderBottom: `1px solid ${T.border.subtle}`,
 			background: "transparent",
 			color: "inherit",
 			cursor: "pointer",
@@ -238,17 +284,17 @@ window.__ModuleLoader__.load({
 			transform: "translateX(-50%)",
 			display: "flex",
 			alignItems: "center",
-			gap: "10px",
-			padding: "8px 14px",
-			borderRadius: "10px",
-			border: "1px solid rgba(127,127,127,0.45)",
-			background: "rgba(32,32,32,0.94)",
-			color: "#fff",
-			fontSize: "13px",
-			boxShadow: "0 6px 24px rgba(0,0,0,0.28)",
+			gap: T.space[5],
+			padding: `${T.space[4]} ${T.space[7]}`,
+			borderRadius: T.radius.lg,
+			border: `1px solid ${T.border.strong}`,
+			background: T.color.toastBg,
+			color: T.color.toastLabel,
+			fontSize: T.font.md,
+			boxShadow: T.shadow.pop,
 			zIndex: 9999,
 		};
-		const toastBtn = { ...smallBtn, color: "inherit", border: "1px solid rgba(255,255,255,0.55)", padding: "2px 8px" };
+		const toastBtn = { ...smallBtn, color: "inherit", border: `1px solid ${T.border.onDark}`, padding: `${T.space[1]} ${T.space[4]}` };
 
 		function clipRaw(value, max) {
 			if (typeof value !== "string") return "";
@@ -356,7 +402,7 @@ window.__ModuleLoader__.load({
 						}),
 						entry,
 					),
-					saved ? h("span", { style: { ...muted, color: "#2e7d32", flex: "0 0 auto" } }, "已保存 ✓") : null,
+					saved ? h("span", { style: { ...muted, color: T.color.success, flex: "0 0 auto" } }, "已保存 ✓") : null,
 					h(
 						"button",
 						withFocus({
@@ -373,13 +419,13 @@ window.__ModuleLoader__.load({
 				saveState === "saving"
 					? h("span", { style: muted }, "保存中…")
 					: saveState === "saved"
-						? h("span", { style: { ...muted, color: "#2e7d32" } }, "已保存 ✓")
+						? h("span", { style: { ...muted, color: T.color.success } }, "已保存 ✓")
 						: saveState
-							? h("span", { style: { color: "#b3261e", fontSize: "12px", wordBreak: "break-word" } }, saveState)
+							? h("span", { style: { color: T.color.danger, fontSize: T.font.sm, wordBreak: "break-word" } }, saveState)
 							: null;
 			return h(
 				"div",
-				{ style: { ...entryRow, flexDirection: "column", gap: "6px", background: "rgba(127,127,127,0.06)" } },
+				{ style: { ...entryRow, flexDirection: "column", gap: T.space[3], background: T.color.hoverSubtle } },
 				h(
 					"textarea",
 					withFocus({
@@ -464,7 +510,7 @@ window.__ModuleLoader__.load({
 			};
 			return h(
 				"div",
-				{ style: { ...row, alignItems: "flex-start", gap: "8px", marginTop: "8px", flexWrap: "wrap" } },
+				{ style: { ...row, alignItems: "flex-start", gap: T.space[4], marginTop: T.space[4], flexWrap: "wrap" } },
 				h(
 					"textarea",
 					withFocus({
@@ -492,7 +538,7 @@ window.__ModuleLoader__.load({
 					}),
 					addBusy ? "添加中…" : "添加",
 				),
-				addError ? h("div", { style: { color: "#b3261e", fontSize: "12px", width: "100%" } }, addError) : null,
+				addError ? h("div", { style: { color: T.color.danger, fontSize: T.font.sm, width: "100%" } }, addError) : null,
 			);
 		}
 		function TrackTabs({ tracks, active, onSelect }) {
@@ -548,16 +594,16 @@ window.__ModuleLoader__.load({
 			});
 			return h(
 				"section",
-				{ style: { marginBottom: "6px" } },
+				{ style: { marginBottom: T.space[3] } },
 				h(
 					"div",
-					{ style: { ...row, justifyContent: "space-between", marginBottom: "4px" } },
-					h("span", { style: { fontSize: "12px", fontWeight: 600, opacity: 0.8 } }, heading),
+					{ style: { ...row, justifyContent: "space-between", marginBottom: T.space[2] } },
+					h("span", { style: { fontSize: T.font.sm, fontWeight: 600, opacity: 0.8 } }, heading),
 					h("span", { style: muted, title: view.usage }, `${entries.length} 条 · ${view.percent}%`),
 				),
-				h("div", { style: { ...row, marginBottom: "10px" } }, h("div", { style: thinTrack }, h("div", { style: barFill(view.percent) }))),
+				h("div", { style: { ...row, marginBottom: T.space[5] } }, h("div", { style: thinTrack }, h("div", { style: barFill(view.percent) }))),
 				entries.length === 0
-					? h("div", { style: { ...muted, padding: "6px 8px", lineHeight: 1.6 } }, hint || "")
+					? h("div", { style: { ...muted, padding: `${T.space[3]} ${T.space[4]}`, lineHeight: T.line.loose } }, hint || "")
 					: keyed.map(({ entry, index, key }) =>
 							h(EntryCard, {
 								key,
@@ -587,13 +633,13 @@ window.__ModuleLoader__.load({
 				{ style: flatSection },
 				h(
 					"div",
-					{ style: { ...row, justifyContent: "space-between", marginBottom: "8px" } },
-					h("strong", { style: { fontSize: "14px" } }, "待确认的后台改动"),
+					{ style: { ...row, justifyContent: "space-between", marginBottom: T.space[4] } },
+					h("strong", { style: { fontSize: T.font.lg } }, "待确认的后台改动"),
 					h("span", { style: muted }, `${items.length} 条`),
 				),
 				h(
 					"div",
-					{ style: muted, marginBottom: "10px" },
+					{ style: muted, marginBottom: T.space[5] },
 					"后台 review 想删除或改写条目，需在这里批准；条目自提案后已变则会标记「已过期」，只能丢弃。",
 				),
 				items.map((item) =>
@@ -602,15 +648,15 @@ window.__ModuleLoader__.load({
 						{ key: item.id, style: itemBox },
 						h(
 							"div",
-							{ style: { ...row, justifyContent: "space-between", marginBottom: "4px" } },
+							{ style: { ...row, justifyContent: "space-between", marginBottom: T.space[2] } },
 							h(
 								"div",
 								{ style: row },
-								h("span", { style: { fontSize: "13px" } }, `${item.action} · ${item.target}`),
+								h("span", { style: { fontSize: T.font.md } }, `${item.action} · ${item.target}`),
 								item.stale
 									? h(
 											"span",
-											{ style: { ...muted, color: "#b3261e" }, title: item.stale_reason || "" },
+											{ style: { ...muted, color: T.color.danger }, title: item.stale_reason || "" },
 											"已过期",
 										)
 									: null,
@@ -643,22 +689,22 @@ window.__ModuleLoader__.load({
 						item.stale
 							? h(
 									"div",
-									{ style: { ...muted, color: "#b3261e", marginTop: "4px" } },
+									{ style: { ...muted, color: T.color.danger, marginTop: T.space[2] } },
 									`${item.stale_reason || "条目自提案后已变"}；这条提案无法再应用，点「丢弃」清理即可。`,
 								)
 							: null,
 						item.old_text || item.content
-							? h("div", { style: { marginTop: "4px" } }, diffRows(item.old_text, item.content, `${item.id}:diff`))
+							? h("div", { style: { marginTop: T.space[2] } }, diffRows(item.old_text, item.content, `${item.id}:diff`))
 							: null,
 						item.operation_count !== undefined
 							? h(
 									"div",
-									{ style: { ...muted, marginTop: "4px", maxHeight: "160px", overflow: "auto" } },
+									{ style: { ...muted, marginTop: T.space[2], maxHeight: "160px", overflow: "auto" } },
 									h("div", null, `批量操作 × ${item.operation_count}`),
 									(Array.isArray(item.operations) ? item.operations : []).map((op, opIndex) =>
 										h(
 											"div",
-											{ key: `${item.id}:op:${opIndex}`, style: { paddingLeft: "10px", marginTop: "3px" } },
+											{ key: `${item.id}:op:${opIndex}`, style: { paddingLeft: T.space[5], marginTop: T.space[1] } },
 											h("div", { style: { ...muted, opacity: 0.8 } }, `· ${op.action}`),
 											diffRows(op.old_text, op.content, `${item.id}:op:${opIndex}`),
 										),
@@ -671,9 +717,9 @@ window.__ModuleLoader__.load({
 					),
 				),
 				error
-					? h("div", { style: { color: "#b3261e", fontSize: "12px", marginTop: "6px" } }, error)
+					? h("div", { style: { color: T.color.danger, fontSize: T.font.sm, marginTop: T.space[3] } }, error)
 					: null,
-				!error && notice ? h("div", { style: { ...muted, fontSize: "12px", marginTop: "6px" } }, notice) : null,
+				!error && notice ? h("div", { style: { ...muted, fontSize: T.font.sm, marginTop: T.space[3] } }, notice) : null,
 			);
 		}
 
@@ -684,13 +730,13 @@ window.__ModuleLoader__.load({
 				{ style: flatSection },
 				h(
 					"div",
-					{ style: { ...row, justifyContent: "space-between", marginBottom: "8px" } },
-					h("strong", { style: { fontSize: "14px" } }, "建议"),
+					{ style: { ...row, justifyContent: "space-between", marginBottom: T.space[4] } },
+					h("strong", { style: { fontSize: T.font.lg } }, "建议"),
 					h("span", { style: muted }, `${items.length} 条`),
 				),
 				h(
 					"div",
-					{ style: { ...muted, marginBottom: "10px" } },
+					{ style: { ...muted, marginBottom: T.space[5] } },
 					"回顾时以 suggest 模式提交的记忆建议；采纳后才会真正写入对应记忆库。",
 				),
 				items.map((item) =>
@@ -699,8 +745,8 @@ window.__ModuleLoader__.load({
 						{ key: item.id, style: itemBox },
 						h(
 							"div",
-							{ style: { ...row, justifyContent: "space-between", marginBottom: "4px" } },
-							h("span", { style: { fontSize: "13px" } }, `${item.target} · ${formatClock(item.created_at)}`),
+							{ style: { ...row, justifyContent: "space-between", marginBottom: T.space[2] } },
+							h("span", { style: { fontSize: T.font.md } }, `${item.target} · ${formatClock(item.created_at)}`),
 							h(
 								"div",
 								{ style: row },
@@ -762,8 +808,8 @@ window.__ModuleLoader__.load({
 				{ style: flatSection },
 				h(
 					"div",
-					{ style: { ...row, justifyContent: "space-between", marginBottom: "8px" } },
-					h("strong", { style: { fontSize: "14px" } }, "最近 review"),
+					{ style: { ...row, justifyContent: "space-between", marginBottom: T.space[4] } },
+					h("strong", { style: { fontSize: T.font.lg } }, "最近 review"),
 					h("span", { style: muted }, `${list.length} 条`),
 				),
 				list.length === 0
@@ -773,9 +819,9 @@ window.__ModuleLoader__.load({
 								"div",
 								{
 									key: item.id,
-									style: { ...row, justifyContent: "space-between", gap: "12px", padding: "3px 0" },
+									style: { ...row, justifyContent: "space-between", gap: T.space[6], padding: `${T.space[1]} 0` },
 								},
-								h("span", { style: { fontSize: "13px", wordBreak: "break-word" } }, item.summary || ""),
+								h("span", { style: { fontSize: T.font.md, wordBreak: "break-word" } }, item.summary || ""),
 								h("span", { style: { ...muted, whiteSpace: "nowrap" } }, formatClock(item.finished_at)),
 							),
 						),
@@ -789,8 +835,8 @@ window.__ModuleLoader__.load({
 				{ style: flatSection },
 				h(
 					"div",
-					{ style: { ...row, justifyContent: "space-between", marginBottom: "8px" } },
-					h("strong", { style: { fontSize: "14px" } }, "最近变更"),
+					{ style: { ...row, justifyContent: "space-between", marginBottom: T.space[4] } },
+					h("strong", { style: { fontSize: T.font.lg } }, "最近变更"),
 					h("span", { style: muted }, `${list.length} 条`),
 				),
 				list.length === 0
@@ -802,10 +848,10 @@ window.__ModuleLoader__.load({
 								{ key: `${item.ts}:${index}`, style: itemBox },
 								h(
 									"div",
-									{ style: { ...row, justifyContent: "space-between", marginBottom: "3px" } },
+									{ style: { ...row, justifyContent: "space-between", marginBottom: T.space[1] } },
 									h(
 										"span",
-										{ style: { fontSize: "13px" } },
+										{ style: { fontSize: T.font.md } },
 										`${formatClock(item.ts)} · ${item.action} · ${item.target}`,
 									),
 									item.batch
@@ -836,13 +882,13 @@ window.__ModuleLoader__.load({
 			width: "100%",
 			boxSizing: "border-box",
 			minHeight: "120px",
-			marginTop: "8px",
-			padding: "8px 10px",
+			marginTop: T.space[4],
+			padding: `${T.space[4]} ${T.space[5]}`,
 			fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
-			fontSize: "12px",
-			lineHeight: "1.45",
-			borderRadius: "8px",
-			border: "1px solid rgba(127,127,127,0.35)",
+			fontSize: T.font.sm,
+			lineHeight: T.line.tight,
+			borderRadius: T.radius.md,
+			border: `1px solid ${T.border.base}`,
 			background: "transparent",
 			color: "inherit",
 			resize: "vertical",
@@ -898,7 +944,7 @@ window.__ModuleLoader__.load({
 				{ style: flatSection },
 				h(
 					"div",
-					{ style: { ...row, justifyContent: "space-between", marginBottom: "6px" } },
+					{ style: { ...row, justifyContent: "space-between", marginBottom: T.space[3] } },
 					h("strong", null, "SYNC · 同步 / 迁移"),
 					h(
 						"div",
@@ -932,8 +978,8 @@ window.__ModuleLoader__.load({
 					onChange: (event) => setText(event.target.value),
 					spellCheck: false,
 				})),
-				message ? h("div", { style: { ...muted, color: "#2e7d32", marginTop: "6px" } }, message) : null,
-				failure ? h("div", { style: { ...muted, color: "#b3261e", marginTop: "6px" } }, failure) : null,
+				message ? h("div", { style: { ...muted, color: T.color.success, marginTop: T.space[3] } }, message) : null,
+				failure ? h("div", { style: { ...muted, color: T.color.danger, marginTop: T.space[3] } }, failure) : null,
 			);
 		}
 
@@ -946,7 +992,7 @@ window.__ModuleLoader__.load({
 				h("strong", null, "疑似重复 · 需要人工合并"),
 				h(
 					"div",
-					{ style: { ...muted, marginTop: "4px" } },
+					{ style: { ...muted, marginTop: T.space[2] } },
 					"这些条目内容高度相似（相似度 ≥ 0.8）；工具与同步都不会自动合并，请编辑其中一条。",
 				),
 				items.map((item, index) =>
@@ -954,15 +1000,15 @@ window.__ModuleLoader__.load({
 						"div",
 						{
 							key: `${item.target}-${index}`,
-							style: { marginTop: "10px", paddingTop: index === 0 ? "0" : "10px", borderTop: index === 0 ? "none" : "1px solid rgba(127,127,127,0.18)" },
+							style: { marginTop: T.space[5], paddingTop: index === 0 ? T.space[0] : T.space[5], borderTop: index === 0 ? "none" : `1px solid ${T.border.subtle}` },
 						},
 						h(
 							"div",
 							{ style: muted },
 							`${TARGET_LABELS[item.target] || item.target} · 相似度 ${Math.round((item.similarity || 0) * 100)}%`,
 						),
-						h("div", { style: { fontSize: "12px", marginTop: "4px", opacity: 0.85 } }, `A: ${clipText(item.a, 160)}`),
-						h("div", { style: { fontSize: "12px", marginTop: "2px", opacity: 0.85 } }, `B: ${clipText(item.b, 160)}`),
+						h("div", { style: { fontSize: T.font.sm, marginTop: T.space[2], opacity: 0.85 } }, `A: ${clipText(item.a, 160)}`),
+						h("div", { style: { fontSize: T.font.sm, marginTop: T.space[1], opacity: 0.85 } }, `B: ${clipText(item.b, 160)}`),
 					),
 				),
 			);
@@ -1167,7 +1213,7 @@ window.__ModuleLoader__.load({
 			if (!state) {
 				return h(
 					"div",
-					{ style: { padding: "20px 24px", opacity: 0.7 } },
+					{ style: { padding: `${T.space[10]} ${T.space[12]}`, opacity: 0.7 } },
 					error ? `加载失败：${error}` : "加载记忆…",
 				);
 			}
@@ -1191,7 +1237,7 @@ window.__ModuleLoader__.load({
 				{ "data-dsh-memory-notes-view": "", style: panel },
 				h(
 					"div",
-					{ style: { ...row, justifyContent: "space-between", marginBottom: "2px" } },
+					{ style: { ...row, justifyContent: "space-between", marginBottom: T.space[1] } },
 					h(
 						"div",
 						{ style: { ...row, flexWrap: "wrap" } },
@@ -1223,7 +1269,7 @@ window.__ModuleLoader__.load({
 							}),
 							searchState?.status === "loading" ? "搜索中…" : "搜索",
 						),
-						pendingCount ? h("span", { style: { ...muted, color: "#b3261e" } }, `${pendingCount} 条待确认`) : null,
+						pendingCount ? h("span", { style: { ...muted, color: T.color.danger } }, `${pendingCount} 条待确认`) : null,
 					),
 					h(
 						"div",
@@ -1244,7 +1290,7 @@ window.__ModuleLoader__.load({
 					),
 				),
 				h("div", { style: note }, "写入立即生效；本会话下一轮可见。"),
-				error ? h("div", { style: { ...muted, color: "#b3261e", marginBottom: "10px" } }, error) : null,
+				error ? h("div", { style: { ...muted, color: T.color.danger, marginBottom: T.space[5] } }, error) : null,
 				h(TrackTabs, { tracks, active: activeKey, onSelect: setActiveTrack }),
 				searchState?.status
 					? h(
@@ -1252,14 +1298,14 @@ window.__ModuleLoader__.load({
 							{
 								style: {
 									...flatSection,
-									borderBottom: "1px solid rgba(127,127,127,0.25)",
-									paddingBottom: "10px",
-									marginBottom: "14px",
+									borderBottom: `1px solid ${T.border.base}`,
+									paddingBottom: T.space[5],
+									marginBottom: T.space[7],
 								},
 							},
 							h(
 								"div",
-								{ style: { ...muted, marginBottom: "6px" } },
+								{ style: { ...muted, marginBottom: T.space[3] } },
 								searchState.status === "loading" ? "搜索中…" : `搜索结果 · ${searchResults.length} 条`,
 							),
 							searchState.status === "loading"
@@ -1267,7 +1313,7 @@ window.__ModuleLoader__.load({
 								: searchState.status === "error"
 									? h(
 											"div",
-											{ style: { color: "#b3261e", fontSize: "12px", wordBreak: "break-word" } },
+											{ style: { color: T.color.danger, fontSize: T.font.sm, wordBreak: "break-word" } },
 											searchState.error || "搜索失败",
 										)
 									: searchResults.length === 0
@@ -1335,7 +1381,7 @@ window.__ModuleLoader__.load({
 									)
 								: null,
 							undoEntry && undoState && undoState !== "undoing" && undoState !== "done"
-								? h("span", { style: { color: "#ffb4ab", wordBreak: "break-word" } }, undoState)
+								? h("span", { style: { color: T.color.dangerOnDark, wordBreak: "break-word" } }, undoState)
 								: null,
 						)
 					: null,
@@ -1351,29 +1397,29 @@ window.__ModuleLoader__.load({
 		const toolRowStyle = {
 			display: "flex",
 			alignItems: "flex-start",
-			gap: "7px",
-			padding: "3px 2px",
-			borderRadius: "6px",
+			gap: T.space[3],
+			padding: `${T.space[1]} ${T.space[1]}`,
+			borderRadius: T.radius.sm,
 			cursor: "pointer",
-			fontSize: "12px",
-			lineHeight: "1.45",
+			fontSize: T.font.sm,
+			lineHeight: T.line.tight,
 			userSelect: "none",
 		};
-		const toolRowBody = { display: "flex", flexDirection: "column", gap: "1px", minWidth: 0, flex: "1 1 auto" };
-		const toolRowTail = { marginLeft: "auto", opacity: 0.5, fontSize: "11px", whiteSpace: "nowrap" };
-		const toolRowMeta = { opacity: 0.62, fontSize: "11px" };
+		const toolRowBody = { display: "flex", flexDirection: "column", gap: T.space[1], minWidth: 0, flex: "1 1 auto" };
+		const toolRowTail = { marginLeft: "auto", opacity: 0.5, fontSize: T.font.xs, whiteSpace: "nowrap" };
+		const toolRowMeta = { opacity: 0.62, fontSize: T.font.xs };
 		const toolRowDetails = {
-			margin: "0 0 6px 24px",
+			margin: `0 0 ${T.space[3]} ${T.space[12]}`,
 			display: "flex",
 			flexDirection: "column",
-			gap: "5px",
-			fontSize: "12px",
-			lineHeight: "1.5",
+			gap: T.space[2],
+			fontSize: T.font.sm,
+			lineHeight: T.line.base,
 			opacity: 0.88,
 			whiteSpace: "pre-wrap",
 			wordBreak: "break-word",
 		};
-		const errorText = { color: "#b3261e" };
+		const errorText = { color: T.color.danger };
 
 		function clipText(value, max) {
 			if (typeof value !== "string") return "";
@@ -1528,7 +1574,7 @@ window.__ModuleLoader__.load({
 								}
 							},
 						}),
-						h("span", { style: { fontSize: "13px", lineHeight: "18px" } }, view.icon),
+						h("span", { style: { fontSize: T.font.md, lineHeight: T.line.pixel } }, view.icon),
 						h(
 							"span",
 							{ style: toolRowBody },
@@ -1621,7 +1667,7 @@ window.__ModuleLoader__.load({
 			const children = [h("span", { key: "label" }, "🧠 记忆")];
 			if (status.pending > 0) {
 				children.push(
-					h("span", { key: "pending", style: { color: "#b3261e", fontWeight: 600 } }, `· 待确认 ${status.pending}`),
+					h("span", { key: "pending", style: { color: T.color.danger, fontWeight: 600 } }, `· 待确认 ${status.pending}`),
 				);
 			}
 			if (commandMode) {
@@ -1638,7 +1684,7 @@ window.__ModuleLoader__.load({
 				"div",
 				{
 					"data-dsh-memory-notes-dock": "",
-					style: { display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "#6b7280", padding: "2px 2px" },
+					style: { display: "flex", alignItems: "center", gap: T.space[4], fontSize: T.font.sm, color: T.color.textTertiary, padding: `${T.space[1]} ${T.space[1]}` },
 				},
 				children,
 			);

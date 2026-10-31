@@ -198,6 +198,37 @@ per-tool presentation slot（`tool.call.toolview`，按工具名 keyed 替换默
   要求它把「可合并/可删除」的建议以 `stage` 动作提交，而不是直接改写技能库；
   默认 `'off'`，与 Hermes 的保守默认一致。
 
+## 0.15.0：视觉 token 化（跟随宿主主题）
+
+面板原来把颜色、字号、圆角、间距全写成内联字面量（`#b3261e`、`rgba(127,127,127,0.22)`、
+`fontSize: "12px"`…），换个主题就是另一套手调，浅色下也没人验证过对比度。这版把视觉参数抽成
+`client.js` 顶部的设计 token 块，全部取值从 token 走。
+
+**token 块**（`const T = { font, radius, space, color, border, shadow, line }`）
+
+- **颜色 / 边框 / 阴影**：改用 DSH 主题包变量 `--dsw-alias-*`（label-primary/secondary/tertiary、
+  bg-base/layer-1/layer-2/skeleton、state-error/success/warn、toast-bg/toast-label、border-l1..l4…），
+  第二参数是脱离宿主（单测、离线渲染）时的 fallback。主题包按 `body[data-ds-dark-theme]` 切换，
+  面板因此自动跟随浅色 / 深色，不需要插件自己判断。
+- **字号 / 圆角 / 间距 / 行高**：DSH 主题包不提供这几类，由插件自建。字号 11/12/13/14/15px 五档；
+  圆角 4/6/8/10/999px；间距用 2px 网格且**键即档位**（`space[6]` = `12px`，代码里写 `T.space[6]` 就能读出像素值）。
+- **替换范围**：184 处内联取值（边框 rgba 分档 13、深色边框 2、阴影 1、颜色 31、fontSize 36、
+  borderRadius 14、lineHeight 8、间距 78），新增 58 个 token。
+
+**主题化带来的两处可见变化**
+
+- 进度条正常态由固定绿 `#4a9d6a` 改为 `state-success-primary`：固定绿在浅色底上只有 3:1 左右，主题色在两种主题下都过 4.5:1。
+- 「搜索」「添加」这类次要按钮底色由半透明灰 `rgba(127,127,127,0.16)` 改为主题层色 `bg-layer-2`，深色下变成实心 `#2c2c2e`，与宿主按钮观感一致。
+
+**对比度验收**：在临时 profile 上用无头 Edge 抓真实 GUI，对面板内 35 个文本节点跑 WCAG 审计
+（取最近不透明祖先背景、按字号/字重判定 3:1 或 4.5:1 阈值）：深色与浅色各一轮，`fail=0`、`under3=0`，
+最差分别为 13.34:1（深色，次要按钮文字）与 18.9:1（浅色）。截图见 `docs/panel-0.15.0.png`（浅色）与
+`docs/panel-0.15.0-dark.png`（深色）。
+
+**回归防线**：新增 `tests/tokens.test.js`（6 条断言）——token 块外不允许出现裸颜色（`#hex` / `rgba(`），
+不允许写死 `fontSize` / `borderRadius`；颜色 token 必须是 `var(--dsw-alias-…, fallback)` 形式；
+边框 token 必须覆盖 L1..L4；间距 token 的键与像素值必须满足 `space[n] = 2n px`。
+
 ## 0.14.0：面板交互与检索（P0 + P1）
 
 按「先修手感，再加快捷入口」把面板从「只能看和点」补成可日常使用的界面。
